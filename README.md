@@ -13,6 +13,6 @@ For example, to create a volume that binds to a local directory `/path/to/local/
 
 2. Create a `.env` file in the repository directory containing the keys of `.env.example`
 
-3. (Optional, for GPU support) Install the NVIDIA Container Toolkit using the script `setup-gpu-host.sh`.
+3. Install the NVIDIA Container Toolkit using the script `setup-gpu-host.sh`.
 
 4. Open the workspace in a devcontainer using VSCode.
