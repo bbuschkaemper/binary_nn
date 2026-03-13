@@ -1,0 +1,16 @@
+{
+    "servers": {
+        "paperSearch": {
+            "type": "stdio",
+            "command": "uv",
+            "args": [
+                "run",
+                "--directory",
+                ".venv/lib64/python3.12/site-packages/paper_search_mcp",
+                "-m",
+                "paper_search_mcp.server"
+            ]
+        }
+    },
+    "inputs": []
+}
