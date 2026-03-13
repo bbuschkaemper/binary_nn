@@ -4,7 +4,7 @@
     "name": "Binary NN Dev Container",
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
-    "workspaceFolder": "/workspaces/protein_lm",
+    "workspaceFolder": "/workspaces/binary_nn",
     "remoteUser": "root",
     "customizations": {
         "vscode": {
@@ -19,7 +19,7 @@
                 "GitHub.copilot-chat"
             ],
             "settings": {
-                "python.defaultInterpreterPath": "/workspaces/protein_lm/.venv/bin/python",
+                "python.defaultInterpreterPath": "/workspaces/binary_nn/.venv/bin/python",
                 "python.terminal.activateEnvInCurrentTerminal": true,
                 "extensions.verifySignature": false,
                 "remote.downloadExtensionsLocally": true

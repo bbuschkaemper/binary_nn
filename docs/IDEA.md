@@ -3,8 +3,7 @@
 Last updated: 2026-03-13
 
 This document formulates a general research idea for a new experimental
-repository. It is intentionally not specific to protein language models or this
-codebase's current implementation.
+repository.
 
 The goal is to define a clean first-principles experiment around a discrete,
 packed feed-forward network (FFN) training method that is related to, but more
