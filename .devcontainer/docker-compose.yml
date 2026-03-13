@@ -1,0 +1,25 @@
+services:
+  devcontainer:
+    build:
+      context: ../../
+      dockerfile: .devcontainer/gpu/Dockerfile
+    user: root
+    volumes:
+      - ../../:/workspaces/binary_nn:cached
+      - data:/mnt
+    command: sleep infinity
+    shm_size: "40gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+                - utility # nvidia-smi
+                - compute # CUDA
+
+volumes:
+  data:
+    external: true
