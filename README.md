@@ -72,6 +72,13 @@ python src/run_binary_regression_sweep.py
 This runs the dense reference once, sweeps several binary configurations, and
 reports the best-accuracy, fastest, and non-dominated binary candidates.
 
+You can also export sweep results and disable the dense residual shortcut for
+ablation:
+
+```bash
+python src/run_binary_regression_sweep.py --disable-binary-shortcut --json-out sweep.json --csv-out sweep.csv
+```
+
 ## Triton Kernel Benchmark
 
 Benchmark the packed Triton inference path for binary linear layers on larger
@@ -88,7 +95,40 @@ On the current `NVIDIA L4` test machine, the first benchmark run showed about
 `2.33x` speedup at shape `(256, 1024, 1024)` and about `2.38x` at shape
 `(512, 2048, 2048)`, with max absolute output differences around `0.0017`.
 
+## Model Inference Benchmark
+
+Benchmark full dense and binary regressor inference on larger synthetic inputs,
+including binary shortcut ablations and Triton on/off:
+
+```bash
+python src/benchmark_model_inference.py --json-out model-benchmark.json --csv-out model-benchmark.csv
+```
+
+This benchmark now trains the compared models on the regression task first,
+then emits both quality metrics and end-to-end latency records so architecture
+and systems tradeoffs can be judged in one artifact.
+
+The latest run also wrote machine-readable outputs to `artifacts/` and showed
+that the Triton path survives end to end at the model level. For example, on an
+`NVIDIA L4` with `input_dim=1024` and `hidden=1024`, the binary model with
+shortcut and Triton reached about `0.1108ms` vs `0.1521ms` without Triton at
+batch `512`, and about `0.2611ms` vs `0.5287ms` at batch `2048`.
+
+The dense-vs-binary comparison script now also includes a model-level inference
+benchmark section by default. You can disable it with:
+
+```bash
+python src/run_regression_comparison.py --skip-inference-benchmark
+```
+
 ## Experiment Notes
 
 Ongoing experiment ideas, steps taken, and measured findings are tracked in
 `docs/BINARY_REGRESSION_EXPERIMENT_LOG.md`.
+
+For session-to-session handoff and planning, also see:
+
+- `docs/README.md`
+- `docs/CURRENT_STATUS.md`
+- `docs/ARCHITECTURE.md`
+- `docs/ROADMAP.md`

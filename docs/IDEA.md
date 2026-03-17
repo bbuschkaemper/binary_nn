@@ -5,6 +5,12 @@ Last updated: 2026-03-13
 This document formulates a general research idea for a new experimental
 repository.
 
+## Document Role
+
+Use this file for the original long-range concept behind the repository. It is
+less useful for current implementation status, but important for understanding
+the intended research direction beyond the current regression prototype.
+
 The goal is to define a clean first-principles experiment around a discrete,
 packed feed-forward network (FFN) training method that is related to, but more
 aggressive than, BitNet-style low-bit training.

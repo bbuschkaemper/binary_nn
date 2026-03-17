@@ -4,6 +4,11 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from model_inference_benchmarking import (
+    InferenceBenchmarkConfig,
+    ModelInferenceBenchmarkRecord,
+    benchmark_regression_run_result,
+)
 from regression_data import RegressionDataConfig
 from regression_experiment import RegressionRunResult, TrainingConfig
 from run_binary_regression import (
@@ -22,6 +27,7 @@ DEFAULT_DENSE_LEARNING_RATE = 1e-3
 class RegressionComparisonResult:
     dense_result: RegressionRunResult
     binary_result: RegressionRunResult
+    inference_benchmark_records: list[ModelInferenceBenchmarkRecord] | None = None
 
     @property
     def test_loss_delta(self) -> float:
@@ -85,6 +91,8 @@ def compare_dense_and_binary_regression(
     data_config: RegressionDataConfig | None = None,
     dense_training_config: TrainingConfig | None = None,
     binary_training_config: TrainingConfig | None = None,
+    binary_use_input_shortcut: bool = True,
+    inference_benchmark_config: InferenceBenchmarkConfig | None = None,
 ) -> RegressionComparisonResult:
     resolved_dense_training_config = dense_training_config or TrainingConfig(
         hidden_dims=DEFAULT_DENSE_HIDDEN_DIMS
@@ -100,11 +108,32 @@ def compare_dense_and_binary_regression(
     binary_result = train_binary_regression(
         data_config=data_config,
         training_config=resolved_binary_training_config,
+        use_input_shortcut=binary_use_input_shortcut,
     )
+
+    inference_benchmark_records = None
+    if inference_benchmark_config is not None:
+        inference_benchmark_records = benchmark_regression_run_result(
+            dense_result,
+            model_name="dense",
+            use_input_shortcut=False,
+            benchmark_config=inference_benchmark_config,
+            benchmark_triton_variants=False,
+        )
+        inference_benchmark_records.extend(
+            benchmark_regression_run_result(
+                binary_result,
+                model_name="binary",
+                use_input_shortcut=binary_use_input_shortcut,
+                benchmark_config=inference_benchmark_config,
+                benchmark_triton_variants=True,
+            )
+        )
 
     return RegressionComparisonResult(
         dense_result=dense_result,
         binary_result=binary_result,
+        inference_benchmark_records=inference_benchmark_records,
     )
 
 
@@ -173,6 +202,18 @@ def _print_result_block(title: str, result: RegressionRunResult) -> None:
     print(f"  Naive RMSE:{result.naive_test_metrics.rmse: .4f}")
 
 
+def _print_inference_benchmark_records(
+    records: list[ModelInferenceBenchmarkRecord],
+) -> None:
+    print("Model inference benchmark")
+    for record in records:
+        print(
+            f"  {record.model_name:<6} batch={record.batch_size:<5} hidden={list(record.hidden_dims)} "
+            f"shortcut={record.use_input_shortcut} triton={record.use_triton_packed_inference} "
+            f"latency={record.latency_ms:.4f}ms rmse={record.test_rmse:.4f} r2={record.test_r2:.4f}"
+        )
+
+
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run dense and binary regression experiments back to back."
@@ -199,6 +240,25 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(DEFAULT_BINARY_HIDDEN_DIMS),
     )
+    parser.add_argument(
+        "--disable-binary-shortcut",
+        action="store_true",
+        help="Disable the dense residual shortcut inside the binary model.",
+    )
+    parser.add_argument(
+        "--skip-inference-benchmark",
+        action="store_true",
+        help="Skip the end-to-end model inference benchmark section.",
+    )
+    parser.add_argument(
+        "--inference-benchmark-batch-sizes",
+        nargs="+",
+        type=int,
+        default=[128],
+        help="Batch sizes to use for the model-level inference latency benchmark.",
+    )
+    parser.add_argument("--inference-benchmark-iterations", type=int, default=50)
+    parser.add_argument("--inference-benchmark-warmup", type=int, default=10)
     return parser
 
 
@@ -246,10 +306,21 @@ def main() -> None:
         seed=args.seed,
     )
 
+    inference_benchmark_config = None
+    if not args.skip_inference_benchmark:
+        inference_benchmark_config = InferenceBenchmarkConfig(
+            batch_sizes=tuple(args.inference_benchmark_batch_sizes),
+            iterations=args.inference_benchmark_iterations,
+            warmup=args.inference_benchmark_warmup,
+            seed=args.seed,
+        )
+
     comparison = compare_dense_and_binary_regression(
         data_config=data_config,
         dense_training_config=dense_training_config,
         binary_training_config=binary_training_config,
+        binary_use_input_shortcut=not args.disable_binary_shortcut,
+        inference_benchmark_config=inference_benchmark_config,
     )
 
     _print_result_block("Dense baseline", comparison.dense_result)
@@ -339,6 +410,9 @@ def main() -> None:
             comparison.total_time_delta,
         )
     )
+    if comparison.inference_benchmark_records:
+        print()
+        _print_inference_benchmark_records(comparison.inference_benchmark_records)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,11 @@ It separates papers into the ones that look foundational for this repository and
 the ones that broaden the picture around training, quantization, inference, and
 hardware.
 
+## Document Role
+
+Use this file as the fastest way to recover the relevant papers and why they
+matter. It is the quickest literature-entry document in the folder.
+
 ## 1. Core 1-Bit LLM Papers
 
 | Year | Paper | Link | Why it matters |

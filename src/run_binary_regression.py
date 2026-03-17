@@ -14,6 +14,7 @@ DEFAULT_BINARY_LEARNING_RATE = 3e-3
 def train_binary_regression(
     data_config: RegressionDataConfig | None = None,
     training_config: TrainingConfig | None = None,
+    use_input_shortcut: bool = True,
 ):
     resolved_training_config = training_config or TrainingConfig(
         hidden_dims=DEFAULT_BINARY_HIDDEN_DIMS,
@@ -23,6 +24,7 @@ def train_binary_regression(
         model_builder=lambda input_dim, hidden_dims: BinaryRegressor(
             input_dim=input_dim,
             hidden_dims=hidden_dims,
+            use_input_shortcut=use_input_shortcut,
         ),
         data_config=data_config,
         training_config=resolved_training_config,
@@ -41,6 +43,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--learning-rate", type=float, default=DEFAULT_BINARY_LEARNING_RATE
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--disable-input-shortcut",
+        action="store_true",
+        help="Disable the dense residual shortcut inside the binary regressor.",
+    )
     return parser
 
 
@@ -61,6 +68,7 @@ def main() -> None:
             learning_rate=args.learning_rate,
             seed=args.seed,
         ),
+        use_input_shortcut=not args.disable_input_shortcut,
     )
 
     print(f"Device: {result.device}")

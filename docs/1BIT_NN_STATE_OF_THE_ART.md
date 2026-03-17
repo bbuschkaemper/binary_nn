@@ -7,6 +7,12 @@ an emphasis on large language models, especially Microsoft BitNet, while also
 tracking newer work on broader binary neural network (BNN) training and
 hardware.
 
+## Document Role
+
+Use this file for external research context, not for the repo's current local
+implementation state. It answers what the broader field appears to believe right
+now.
+
 ## 1. Scope
 
 There are now two related but meaningfully different research tracks:

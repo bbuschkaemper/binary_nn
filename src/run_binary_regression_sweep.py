@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 from dataclasses import dataclass
 from itertools import product
+from pathlib import Path
 
 from regression_data import RegressionDataConfig
 from regression_experiment import TrainingConfig
@@ -23,6 +26,7 @@ class BinarySweepSummary:
     hidden_dims: tuple[int, ...]
     learning_rate: float
     epochs: int
+    use_input_shortcut: bool
     rmse: float
     r2: float
     total_seconds: float
@@ -62,9 +66,37 @@ def _print_candidate(prefix: str, candidate: BinarySweepSummary) -> None:
     print(
         f"{prefix:<10} hidden={_format_hidden_dims(candidate.hidden_dims):<8} "
         f"lr={candidate.learning_rate:<7.4g} epochs={candidate.epochs:<3d} "
+        f"shortcut={str(candidate.use_input_shortcut):<5} "
         f"rmse={candidate.rmse:<8.4f} r2={candidate.r2:<7.4f} "
         f"total={candidate.total_seconds:<7.4f}s params={candidate.parameter_count}"
     )
+
+
+def sweep_summary_to_record(summary: BinarySweepSummary) -> dict[str, object]:
+    return {
+        "hidden_dims": list(summary.hidden_dims),
+        "learning_rate": summary.learning_rate,
+        "epochs": summary.epochs,
+        "use_input_shortcut": summary.use_input_shortcut,
+        "rmse": summary.rmse,
+        "r2": summary.r2,
+        "total_seconds": summary.total_seconds,
+        "parameter_count": summary.parameter_count,
+    }
+
+
+def _write_json(records: list[dict[str, object]], output_path: Path) -> None:
+    output_path.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_csv(records: list[dict[str, object]], output_path: Path) -> None:
+    if not records:
+        output_path.write_text("", encoding="utf-8")
+        return
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(records[0].keys()))
+        writer.writeheader()
+        writer.writerows(records)
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -93,6 +125,13 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_BINARY_EPOCHS,
     )
+    parser.add_argument(
+        "--disable-binary-shortcut",
+        action="store_true",
+        help="Disable the dense residual shortcut for all swept binary models.",
+    )
+    parser.add_argument("--json-out", type=Path, default=None)
+    parser.add_argument("--csv-out", type=Path, default=None)
     return parser
 
 
@@ -141,12 +180,14 @@ def main() -> None:
                 learning_rate=learning_rate,
                 seed=args.seed,
             ),
+            use_input_shortcut=not args.disable_binary_shortcut,
         )
         summaries.append(
             BinarySweepSummary(
                 hidden_dims=hidden_dims,
                 learning_rate=learning_rate,
                 epochs=epochs,
+                use_input_shortcut=not args.disable_binary_shortcut,
                 rmse=result.test_metrics.rmse,
                 r2=result.test_metrics.r2,
                 total_seconds=result.runtime.total_seconds,
@@ -171,6 +212,12 @@ def main() -> None:
     print("Pareto frontier")
     for candidate in pareto_frontier(summaries):
         _print_candidate("frontier", candidate)
+
+    records = [sweep_summary_to_record(summary) for summary in summaries]
+    if args.json_out is not None:
+        _write_json(records, args.json_out)
+    if args.csv_out is not None:
+        _write_csv(records, args.csv_out)
 
 
 if __name__ == "__main__":

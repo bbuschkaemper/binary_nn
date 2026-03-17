@@ -6,6 +6,11 @@ This document records the concrete ideas tested so far for the regression
 proof-of-concept, the measurements that came out of those tests, and the
 current best binary configurations.
 
+## Document Role
+
+Use this file when you need the detailed story: what was tried, what worked,
+what failed, and what numbers were observed.
+
 ## 1. Goal
 
 The working objective for this repository is not just to make a binary-weight
@@ -190,6 +195,87 @@ First measured benchmark results on the repository's `NVIDIA L4` machine:
 This is the first direct evidence in the repo that the packed custom-kernel
 direction can produce the kind of runtime gains that the generic PyTorch path
 could not.
+
+### 3.9 Added exportable sweeps and end-to-end inference benchmarking
+
+The next gap after the packed-kernel proof of concept was experiment hygiene and
+model-level measurement.
+
+Two upgrades were added:
+
+- `src/run_binary_regression_sweep.py` can now export full sweep results to
+  JSON and CSV
+- `src/benchmark_model_inference.py` benchmarks whole dense and binary
+  regressors, not just isolated binary linear kernels, and includes trained
+  model quality metrics in the exported artifact
+
+The model benchmark also includes two important ablations:
+
+- binary shortcut on vs off
+- Triton packed inference on vs off
+
+That makes it possible to separate three effects that were previously mixed
+together:
+
+- architecture gain from the dense residual shortcut
+- systems gain from the packed Triton inference path
+- remaining gap between microkernel wins and end-to-end model wins
+
+The dense-vs-binary comparison workflow now also includes the model-level
+inference benchmark section by default, so the normal report includes both task
+quality metrics and trained-model latency records.
+
+### 3.10 Integrated trained-model inference benchmarking into the comparison workflow
+
+The next refinement was to reduce duplication between:
+
+- the standalone trained-model inference benchmark
+- the dense-vs-binary comparison report
+
+That was done by introducing shared inference benchmarking utilities and using
+them in both entry points.
+
+This changed the workflow in two important ways:
+
+- the comparison report now includes trained-model inference latency records by
+  default
+- the standalone model benchmark now exports quality metrics and latency from
+  the same trained models, rather than only benchmarking randomly initialized
+  models on synthetic inputs
+
+This is a meaningful quality improvement to the research process because it
+reduces the chance of drawing conclusions from inconsistent benchmarking paths.
+
+First measured end-to-end inference results on the repository's `NVIDIA L4`
+machine with `input_dim=1024` and binary hidden dims `(1024,)`:
+
+- dense `(1024, 1024)` at batch `512`: about `0.2107ms`
+- binary with shortcut, no Triton at batch `512`: about `0.1521ms`
+- binary with shortcut and Triton at batch `512`: about `0.1108ms`
+- dense `(1024, 1024)` at batch `2048`: about `0.7788ms`
+- binary with shortcut, no Triton at batch `2048`: about `0.5287ms`
+- binary with shortcut and Triton at batch `2048`: about `0.2611ms`
+
+Interpretation:
+
+- the Triton microkernel speedup survives end to end in the model benchmark
+- the residual shortcut is still worth keeping in the binary model
+- the repo now has both microkernel and model-level evidence that custom packed
+  kernels materially improve binary inference throughput
+
+Additional compact comparison-run validation on the regression workflow:
+
+- dense at `10` epochs on `1024` samples: about `0.1850ms` model-level latency
+  for benchmark batch `128`, with `RMSE 49.27` and `R2 0.9419`
+- binary at `10` epochs on `1024` samples, shortcut on, Triton off: about
+  `0.2892ms`
+- binary at `10` epochs on `1024` samples, shortcut on, Triton on: about
+  `0.1850ms`
+
+This short-run result should not be treated as a quality conclusion because the
+binary model is clearly undertrained at `10` epochs. It is mainly a validation
+that the comparison workflow now reports trained-model latency and quality in a
+single run.
 
 ## 4. Best Measured Configurations So Far
 

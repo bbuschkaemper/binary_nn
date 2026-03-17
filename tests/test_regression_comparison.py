@@ -12,6 +12,7 @@ if str(SRC_DIR) not in sys.path:
 
 from regression_data import RegressionDataConfig
 from regression_experiment import TrainingConfig
+from model_inference_benchmarking import InferenceBenchmarkConfig
 from run_regression_comparison import compare_dense_and_binary_regression
 
 
@@ -39,6 +40,12 @@ def test_regression_comparison_reports_runtime_and_custom_widths() -> None:
             seed=7,
             accelerator="cpu",
         ),
+        inference_benchmark_config=InferenceBenchmarkConfig(
+            batch_sizes=(64,),
+            iterations=2,
+            warmup=1,
+            seed=7,
+        ),
     )
 
     assert comparison.dense_result.training_config.hidden_dims == (16, 8)
@@ -48,3 +55,16 @@ def test_regression_comparison_reports_runtime_and_custom_widths() -> None:
     assert comparison.binary_result.runtime.parameter_count > 0
     assert comparison.dense_result.runtime.total_seconds > 0.0
     assert comparison.binary_result.runtime.total_seconds > 0.0
+    assert comparison.inference_benchmark_records is not None
+    assert len(comparison.inference_benchmark_records) >= 2
+    assert any(
+        record.model_name == "dense"
+        for record in comparison.inference_benchmark_records
+    )
+    assert any(
+        record.model_name == "binary"
+        for record in comparison.inference_benchmark_records
+    )
+    assert all(
+        record.test_rmse > 0.0 for record in comparison.inference_benchmark_records
+    )

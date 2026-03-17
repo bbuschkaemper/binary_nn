@@ -1,0 +1,114 @@
+[
+  {
+    "model_name": "dense",
+    "batch_size": 512,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024,
+      1024
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.21068188001663657
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 512,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": true,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.15207079999527195
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 512,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": true,
+    "use_triton_packed_inference": true,
+    "latency_ms": 0.11077371997089358
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 512,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.14480826001090463
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 512,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": true,
+    "latency_ms": 0.08485755999572575
+  },
+  {
+    "model_name": "dense",
+    "batch_size": 2048,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024,
+      1024
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.7788347200039425
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 2048,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": true,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.5286757200155989
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 2048,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": true,
+    "use_triton_packed_inference": true,
+    "latency_ms": 0.26105319997441256
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 2048,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.39598824001586763
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 2048,
+    "input_dim": 1024,
+    "hidden_dims": [
+      1024
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": true,
+    "latency_ms": 0.3854377999959979
+  }
+]

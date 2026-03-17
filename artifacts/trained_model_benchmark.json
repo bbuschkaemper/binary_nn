@@ -1,0 +1,54 @@
+[
+  {
+    "model_name": "dense",
+    "batch_size": 128,
+    "input_dim": 10,
+    "hidden_dims": [
+      64,
+      32
+    ],
+    "use_input_shortcut": false,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.1854936999734491,
+    "test_loss": 0.053725726902484894,
+    "test_rmse": 49.26970576581516,
+    "test_mae": 38.08143997192383,
+    "test_r2": 0.9419362354367539,
+    "parameter_count": 2817,
+    "benchmark_device": "cuda"
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 128,
+    "input_dim": 10,
+    "hidden_dims": [
+      8
+    ],
+    "use_input_shortcut": true,
+    "use_triton_packed_inference": false,
+    "latency_ms": 0.2877314000215847,
+    "test_loss": 0.49477487802505493,
+    "test_rmse": 149.51771425152273,
+    "test_mae": 120.82513427734375,
+    "test_r2": 0.4652749159096945,
+    "parameter_count": 108,
+    "benchmark_device": "cuda"
+  },
+  {
+    "model_name": "binary",
+    "batch_size": 128,
+    "input_dim": 10,
+    "hidden_dims": [
+      8
+    ],
+    "use_input_shortcut": true,
+    "use_triton_packed_inference": true,
+    "latency_ms": 0.1854997999544139,
+    "test_loss": 0.49477487802505493,
+    "test_rmse": 149.51771425152273,
+    "test_mae": 120.82513427734375,
+    "test_r2": 0.4652749159096945,
+    "parameter_count": 108,
+    "benchmark_device": "cuda"
+  }
+]
