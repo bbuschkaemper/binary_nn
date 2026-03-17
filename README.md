@@ -37,7 +37,11 @@ Run the first binary-weight regression experiment from the repository root:
 python src/run_binary_regression.py --samples 4096 --epochs 75
 ```
 
-This version keeps the Lightning training loop but swaps the hidden layers to binary-weight layers trained with a straight-through estimator, latent-weight clipping, batch normalization, and a dense output head for regression.
+This version keeps the Lightning training loop but uses a binary residual regressor: a small binary hidden path trained with a straight-through estimator and latent-weight clipping, plus a dense linear shortcut that helps on regression-style targets.
+
+At evaluation time, `BinaryLinear` now attempts an eval-only packed Triton
+inference path automatically for 2D CUDA inputs under `torch.no_grad()`. The
+training path remains standard PyTorch so optimization behavior is unchanged.
 
 ## Dense vs Binary Comparison
 
@@ -47,12 +51,44 @@ Run both experiments back to back on the same generated dataset:
 python src/run_regression_comparison.py --samples 4096 --epochs 75
 ```
 
-The comparison script prints the dense metrics, the binary metrics, and the signed deltas for test loss, MSE, MAE, RMSE, and $R^2$ using `binary - dense`.
+The comparison script prints the dense metrics, the binary metrics, and the signed deltas for test loss, MSE, MAE, RMSE, and $R^2$ using `binary - dense`. It also supports separate dense and binary learning rates and epoch budgets so you can search for a better quality-time tradeoff.
 
 You can also compare different model widths directly, for example a denser binary model against the default dense baseline:
 
 ```bash
-python src/run_regression_comparison.py --samples 4096 --epochs 75 --dense-hidden-dims 64 32 --binary-hidden-dims 64 64
+python src/run_regression_comparison.py --samples 4096 --dense-epochs 75 --binary-epochs 40 --dense-hidden-dims 64 32 --binary-hidden-dims 8 --dense-learning-rate 1e-3 --binary-learning-rate 3e-3
 ```
 
 The report includes parameter counts and wall-clock fit, test, predict, and total times so you can see whether a wider binary network still has a runtime advantage on your hardware.
+
+## Binary Sweep
+
+Run a curated binary sweep and print the current Pareto frontier:
+
+```bash
+python src/run_binary_regression_sweep.py
+```
+
+This runs the dense reference once, sweeps several binary configurations, and
+reports the best-accuracy, fastest, and non-dominated binary candidates.
+
+## Triton Kernel Benchmark
+
+Benchmark the packed Triton inference path for binary linear layers on larger
+synthetic shapes:
+
+```bash
+python src/benchmark_packed_binary_kernels.py
+```
+
+This keeps training on the standard PyTorch path but benchmarks an eval-only,
+packed-sign inference kernel implemented with Triton.
+
+On the current `NVIDIA L4` test machine, the first benchmark run showed about
+`2.33x` speedup at shape `(256, 1024, 1024)` and about `2.38x` at shape
+`(512, 2048, 2048)`, with max absolute output differences around `0.0017`.
+
+## Experiment Notes
+
+Ongoing experiment ideas, steps taken, and measured findings are tracked in
+`docs/BINARY_REGRESSION_EXPERIMENT_LOG.md`.

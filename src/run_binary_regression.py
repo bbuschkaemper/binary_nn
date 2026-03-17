@@ -7,7 +7,8 @@ from regression_experiment import TrainingConfig, train_regression_model
 from regression_models import BinaryRegressor
 
 
-DEFAULT_BINARY_HIDDEN_DIMS = (32, 16)
+DEFAULT_BINARY_HIDDEN_DIMS = (8,)
+DEFAULT_BINARY_LEARNING_RATE = 3e-3
 
 
 def train_binary_regression(
@@ -15,7 +16,8 @@ def train_binary_regression(
     training_config: TrainingConfig | None = None,
 ):
     resolved_training_config = training_config or TrainingConfig(
-        hidden_dims=DEFAULT_BINARY_HIDDEN_DIMS
+        hidden_dims=DEFAULT_BINARY_HIDDEN_DIMS,
+        learning_rate=DEFAULT_BINARY_LEARNING_RATE,
     )
     return train_regression_model(
         model_builder=lambda input_dim, hidden_dims: BinaryRegressor(
@@ -35,7 +37,9 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--noise", type=float, default=12.0)
     parser.add_argument("--epochs", type=int, default=75)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--learning-rate", type=float, default=DEFAULT_BINARY_LEARNING_RATE
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser
 

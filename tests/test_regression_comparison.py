@@ -33,16 +33,17 @@ def test_regression_comparison_reports_runtime_and_custom_widths() -> None:
             accelerator="cpu",
         ),
         binary_training_config=TrainingConfig(
-            hidden_dims=(32, 16),
+            hidden_dims=(8,),
             epochs=5,
-            learning_rate=1e-3,
+            learning_rate=3e-3,
             seed=7,
             accelerator="cpu",
         ),
     )
 
     assert comparison.dense_result.training_config.hidden_dims == (16, 8)
-    assert comparison.binary_result.training_config.hidden_dims == (32, 16)
+    assert comparison.binary_result.training_config.hidden_dims == (8,)
+    assert comparison.binary_result.training_config.learning_rate == 3e-3
     assert comparison.dense_result.runtime.parameter_count > 0
     assert comparison.binary_result.runtime.parameter_count > 0
     assert comparison.dense_result.runtime.total_seconds > 0.0

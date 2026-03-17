@@ -26,15 +26,16 @@ def test_binary_regression_beats_naive_predictor() -> None:
             random_state=7,
         ),
         training_config=TrainingConfig(
-            hidden_dims=(32, 16),
+            hidden_dims=(8,),
             epochs=30,
-            learning_rate=1e-3,
+            learning_rate=3e-3,
             seed=7,
+            accelerator="cpu",
         ),
     )
 
     test_metrics = result.test_metrics
     naive_metrics = result.naive_test_metrics
 
-    assert test_metrics.r2 > 0.88
+    assert test_metrics.r2 > 0.94
     assert test_metrics.rmse < naive_metrics.rmse * 0.4

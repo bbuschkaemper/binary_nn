@@ -6,11 +6,16 @@ from dataclasses import dataclass
 
 from regression_data import RegressionDataConfig
 from regression_experiment import RegressionRunResult, TrainingConfig
-from run_binary_regression import DEFAULT_BINARY_HIDDEN_DIMS, train_binary_regression
+from run_binary_regression import (
+    DEFAULT_BINARY_HIDDEN_DIMS,
+    DEFAULT_BINARY_LEARNING_RATE,
+    train_binary_regression,
+)
 from run_regression_baseline import train_regression_baseline
 
 
 DEFAULT_DENSE_HIDDEN_DIMS = (64, 32)
+DEFAULT_DENSE_LEARNING_RATE = 1e-3
 
 
 @dataclass(slots=True)
@@ -153,6 +158,8 @@ def _print_result_block(title: str, result: RegressionRunResult) -> None:
     print(
         f"  Hidden dims:{_format_hidden_dims(result.training_config.hidden_dims):>12}"
     )
+    print(f"  Epochs:    {result.training_config.epochs}")
+    print(f"  Learn rate:{result.training_config.learning_rate:>12.4g}")
     print(f"  Device:    {result.device}")
     print(f"  Parameters:{runtime.parameter_count:>12d}")
     print(f"  Fit time:  {runtime.fit_seconds:.4f}s")
@@ -174,7 +181,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--noise", type=float, default=12.0)
     parser.add_argument("--epochs", type=int, default=75)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--dense-epochs", type=int, default=None)
+    parser.add_argument("--binary-epochs", type=int, default=None)
+    parser.add_argument("--dense-learning-rate", type=float, default=None)
+    parser.add_argument("--binary-learning-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--dense-hidden-dims",
@@ -193,6 +204,27 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_argument_parser().parse_args()
+    dense_epochs = args.dense_epochs or args.epochs
+    binary_epochs = args.binary_epochs or args.epochs
+    dense_learning_rate = (
+        args.dense_learning_rate
+        if args.dense_learning_rate is not None
+        else (
+            args.learning_rate
+            if args.learning_rate is not None
+            else DEFAULT_DENSE_LEARNING_RATE
+        )
+    )
+    binary_learning_rate = (
+        args.binary_learning_rate
+        if args.binary_learning_rate is not None
+        else (
+            args.learning_rate
+            if args.learning_rate is not None
+            else DEFAULT_BINARY_LEARNING_RATE
+        )
+    )
+
     data_config = RegressionDataConfig(
         n_samples=args.samples,
         n_features=10,
@@ -203,14 +235,14 @@ def main() -> None:
     )
     dense_training_config = TrainingConfig(
         hidden_dims=tuple(args.dense_hidden_dims),
-        epochs=args.epochs,
-        learning_rate=args.learning_rate,
+        epochs=dense_epochs,
+        learning_rate=dense_learning_rate,
         seed=args.seed,
     )
     binary_training_config = TrainingConfig(
         hidden_dims=tuple(args.binary_hidden_dims),
-        epochs=args.epochs,
-        learning_rate=args.learning_rate,
+        epochs=binary_epochs,
+        learning_rate=binary_learning_rate,
         seed=args.seed,
     )
 
