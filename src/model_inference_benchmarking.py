@@ -4,6 +4,7 @@ import copy
 import csv
 import json
 import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -46,6 +47,121 @@ def model_inference_record_to_dict(
     return result
 
 
+def dominates_model_inference(
+    left: ModelInferenceBenchmarkRecord,
+    right: ModelInferenceBenchmarkRecord,
+) -> bool:
+    return (
+        left.test_rmse <= right.test_rmse
+        and left.latency_ms <= right.latency_ms
+        and (left.test_rmse < right.test_rmse or left.latency_ms < right.latency_ms)
+    )
+
+
+def model_inference_pareto_frontier(
+    records: list[ModelInferenceBenchmarkRecord],
+) -> list[ModelInferenceBenchmarkRecord]:
+    frontier: list[ModelInferenceBenchmarkRecord] = []
+    for candidate in records:
+        if any(
+            dominates_model_inference(other, candidate)
+            for other in records
+            if other != candidate
+        ):
+            continue
+        frontier.append(candidate)
+    return sorted(frontier, key=lambda item: (item.latency_ms, item.test_rmse))
+
+
+def build_binary_ablation_matrix(
+    records: list[ModelInferenceBenchmarkRecord],
+) -> list[dict[str, object]]:
+    binary_records = [record for record in records if record.model_name == "binary"]
+    grouped_by_batch: dict[int, list[ModelInferenceBenchmarkRecord]] = defaultdict(list)
+    for record in binary_records:
+        grouped_by_batch[record.batch_size].append(record)
+
+    matrix_rows: list[dict[str, object]] = []
+    for batch_size in sorted(grouped_by_batch):
+        batch_records = grouped_by_batch[batch_size]
+        by_variant = {
+            (record.use_input_shortcut, record.use_triton_packed_inference): record
+            for record in batch_records
+        }
+        for shortcut_enabled, use_triton in sorted(by_variant):
+            record = by_variant[(shortcut_enabled, use_triton)]
+            same_shortcut_baseline = by_variant.get((shortcut_enabled, False))
+            no_shortcut_baseline = by_variant.get((False, use_triton))
+            matrix_rows.append(
+                {
+                    "batch_size": batch_size,
+                    "hidden_dims": list(record.hidden_dims),
+                    "use_input_shortcut": shortcut_enabled,
+                    "use_triton_packed_inference": use_triton,
+                    "latency_ms": record.latency_ms,
+                    "test_rmse": record.test_rmse,
+                    "test_r2": record.test_r2,
+                    "speedup_vs_same_shortcut_no_triton": (
+                        same_shortcut_baseline.latency_ms / record.latency_ms
+                        if same_shortcut_baseline is not None and record.latency_ms > 0.0
+                        else None
+                    ),
+                    "latency_delta_vs_same_shortcut_no_triton_ms": (
+                        record.latency_ms - same_shortcut_baseline.latency_ms
+                        if same_shortcut_baseline is not None
+                        else None
+                    ),
+                    "latency_delta_vs_no_shortcut_same_triton_ms": (
+                        record.latency_ms - no_shortcut_baseline.latency_ms
+                        if no_shortcut_baseline is not None
+                        else None
+                    ),
+                    "rmse_delta_vs_no_shortcut_same_triton": (
+                        record.test_rmse - no_shortcut_baseline.test_rmse
+                        if no_shortcut_baseline is not None
+                        else None
+                    ),
+                }
+            )
+    return matrix_rows
+
+
+def build_model_inference_summary(
+    records: list[ModelInferenceBenchmarkRecord],
+) -> dict[str, object]:
+    grouped_by_batch: dict[int, list[ModelInferenceBenchmarkRecord]] = defaultdict(list)
+    for record in records:
+        grouped_by_batch[record.batch_size].append(record)
+
+    by_batch_size: list[dict[str, object]] = []
+    for batch_size in sorted(grouped_by_batch):
+        batch_records = grouped_by_batch[batch_size]
+        fastest = sorted(batch_records, key=lambda item: (item.latency_ms, item.test_rmse))[:5]
+        best_rmse = sorted(batch_records, key=lambda item: (item.test_rmse, item.latency_ms))[:5]
+        frontier = model_inference_pareto_frontier(batch_records)
+        by_batch_size.append(
+            {
+                "batch_size": batch_size,
+                "fastest_candidates": [
+                    model_inference_record_to_dict(record) for record in fastest
+                ],
+                "best_rmse_candidates": [
+                    model_inference_record_to_dict(record) for record in best_rmse
+                ],
+                "pareto_frontier": [
+                    model_inference_record_to_dict(record) for record in frontier
+                ],
+            }
+        )
+
+    return {
+        "benchmark_device": records[0].benchmark_device if records else "unknown",
+        "candidate_count": len(records),
+        "by_batch_size": by_batch_size,
+        "binary_ablation_matrix": build_binary_ablation_matrix(records),
+    }
+
+
 def write_model_inference_benchmark_json(
     records: list[ModelInferenceBenchmarkRecord],
     output_path: Path,
@@ -72,6 +188,39 @@ def write_model_inference_benchmark_csv(
         writer = csv.DictWriter(handle, fieldnames=list(serialized[0].keys()))
         writer.writeheader()
         writer.writerows(serialized)
+
+
+def write_model_inference_summary_json(
+    records: list[ModelInferenceBenchmarkRecord],
+    output_path: Path,
+) -> None:
+    output_path.write_text(
+        json.dumps(build_model_inference_summary(records), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_model_inference_frontier_csv(
+    records: list[ModelInferenceBenchmarkRecord],
+    output_path: Path,
+) -> None:
+    frontier_records: list[dict[str, object]] = []
+    grouped_by_batch: dict[int, list[ModelInferenceBenchmarkRecord]] = defaultdict(list)
+    for record in records:
+        grouped_by_batch[record.batch_size].append(record)
+
+    for batch_size in sorted(grouped_by_batch):
+        for frontier_record in model_inference_pareto_frontier(grouped_by_batch[batch_size]):
+            frontier_records.append(model_inference_record_to_dict(frontier_record))
+
+    if not frontier_records:
+        output_path.write_text("", encoding="utf-8")
+        return
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(frontier_records[0].keys()))
+        writer.writeheader()
+        writer.writerows(frontier_records)
 
 
 def _set_binary_linear_triton_usage(model: torch.nn.Module, enabled: bool) -> None:

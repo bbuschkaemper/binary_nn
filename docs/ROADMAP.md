@@ -19,6 +19,11 @@ The last completed workstream delivered:
 - microkernel benchmarking
 - trained-model end-to-end inference benchmarking
 - comparison-script integration of model-level inference timing
+- artifact-level summary and frontier extraction for sweep and trained-model
+  benchmark outputs
+- default binary shortcut and Triton ablation matrix automation in the
+  trained-model benchmark
+- output routing under `/mnt` for generated artifacts and checkpoints
 
 That means the repo now has both quality-oriented and systems-oriented evidence,
 not just architecture experiments.
@@ -28,18 +33,20 @@ not just architecture experiments.
 These are the highest-priority next tasks if work resumes without changing the
 overall direction.
 
-### 2.1 Keep improving the benchmark pipeline
+### 2.1 Keep benchmark outputs decision-ready
 
 - keep exporting JSON and CSV for all important sweeps and benchmarks
-- add a small summary table or frontier extraction from exported artifacts
+- preserve artifact-level summaries and frontier exports as the default path,
+  not an optional extra step
 - keep trained-model quality metrics and latency in the same records
 
-### 2.2 Strengthen shortcut ablations
+### 2.2 Use the ablation matrix as the binary baseline gate
 
-- compare binary-with-shortcut vs binary-without-shortcut more systematically
+- treat shortcut on or off and Triton on or off as the standard binary systems
+  matrix when evaluating major binary changes
 - avoid mixing architecture gains with kernel gains in the same conclusion
-- use the shortcut toggle in sweeps and comparison runs whenever a major model
-  change is tested
+- reject binary changes that do not beat the current baseline cleanly on that
+  matrix
 
 ### 2.3 Expand the Triton path carefully
 
@@ -47,6 +54,14 @@ overall direction.
   change it
 - extend the packed inference path only where it can be benchmarked clearly
 - prefer end-to-end model wins over microkernel wins when choosing priorities
+
+### 2.4 Prepare the next representation baseline
+
+- do not refactor the current binary path away
+- add the smallest possible ternary or int2 research prototype beside the
+  existing binary baseline
+- make sure the prototype is benchmarkable with the same artifact and ablation
+  machinery already used for the binary path
 
 ## 3. Open Design Decision
 
@@ -125,7 +140,26 @@ If the hybrid path is chosen, the first milestone should be:
 4. only then decide whether the regression model itself should get a ternary
    training or inference variant
 
-## 6. Decision Note For Future Sessions
+## 6. Recommended Execution Order
+
+If work resumes now, the recommended order is:
+
+1. add artifact-level summary or frontier extraction for the existing binary
+  sweep and inference outputs
+2. run a disciplined shortcut and Triton ablation matrix to lock in the binary
+  baseline story
+3. add one minimal ternary or int2 layer prototype with matching benchmark
+  hooks
+4. compare binary versus ternary on kernel behavior first, and only then on
+  regression quality
+
+This sequence keeps the repo scientifically clean:
+
+- first improve decision quality around the working binary baseline
+- then open the next representation branch
+- only then spend effort on broader architecture changes
+
+## 7. Decision Note For Future Sessions
 
 If a future session begins without user input on the open decision, default to:
 

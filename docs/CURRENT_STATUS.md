@@ -46,10 +46,16 @@ The repository currently has four working layers of functionality.
 ### 1.4 Benchmarking and experiment tooling
 
 - Binary sweep script supports JSON and CSV export.
-- Kernel microbenchmark exists for packed Triton inference.
+- Binary sweep script now also emits summary and frontier artifacts.
+- Kernel microbenchmark exists for packed Triton inference and now emits JSON,
+  CSV, summary, and frontier artifacts.
 - Model-level inference benchmark exists for trained dense and binary models.
+- Model-level inference benchmark now automates the shortcut and Triton ablation
+  matrix by default.
 - The dense-vs-binary comparison script now includes a model-level inference
-  benchmark section by default.
+  benchmark section by default and now emits a comparison artifact bundle.
+- Generated artifacts and Lightning checkpoints are now routed under `/mnt`, not
+  back into the repository tree.
 
 ## 2. Most Important Files
 
@@ -133,8 +139,8 @@ during the recent iterations.
 
 ### 4.3 Artifact export
 
-The repository now emits machine-readable benchmark artifacts, for example in
-`artifacts/`.
+The repository now emits machine-readable benchmark artifacts under `/mnt`, with
+default benchmark outputs written to `/mnt/binary_nn/artifacts/`.
 
 ## 5. Assumptions For The Next Session
 

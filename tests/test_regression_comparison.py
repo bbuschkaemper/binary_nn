@@ -13,7 +13,10 @@ if str(SRC_DIR) not in sys.path:
 from regression_data import RegressionDataConfig
 from regression_experiment import TrainingConfig
 from model_inference_benchmarking import InferenceBenchmarkConfig
-from run_regression_comparison import compare_dense_and_binary_regression
+from run_regression_comparison import (
+    compare_dense_and_binary_regression,
+    regression_comparison_result_to_dict,
+)
 
 
 def test_regression_comparison_reports_runtime_and_custom_widths() -> None:
@@ -68,3 +71,44 @@ def test_regression_comparison_reports_runtime_and_custom_widths() -> None:
     assert all(
         record.test_rmse > 0.0 for record in comparison.inference_benchmark_records
     )
+
+
+def test_regression_comparison_serialization_includes_inference_summary() -> None:
+    comparison = compare_dense_and_binary_regression(
+        data_config=RegressionDataConfig(
+            n_samples=256,
+            n_features=10,
+            n_informative=10,
+            noise=8.0,
+            batch_size=64,
+            random_state=11,
+        ),
+        dense_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=3,
+            learning_rate=1e-3,
+            seed=11,
+            accelerator="cpu",
+        ),
+        binary_training_config=TrainingConfig(
+            hidden_dims=(8,),
+            epochs=3,
+            learning_rate=3e-3,
+            seed=11,
+            accelerator="cpu",
+        ),
+        inference_benchmark_config=InferenceBenchmarkConfig(
+            batch_sizes=(32,),
+            iterations=1,
+            warmup=0,
+            seed=11,
+        ),
+    )
+
+    serialized = regression_comparison_result_to_dict(comparison)
+
+    assert "dense_result" in serialized
+    assert "binary_result" in serialized
+    assert "deltas" in serialized
+    assert "inference_benchmark" in serialized
+    assert serialized["inference_benchmark"]["summary"]["candidate_count"] >= 2

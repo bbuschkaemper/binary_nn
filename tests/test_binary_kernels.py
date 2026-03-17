@@ -19,6 +19,11 @@ from binary_kernels import (
     packed_binary_linear_triton,
     unpack_binary_weight,
 )
+from benchmark_packed_binary_kernels import (
+    BenchmarkResult,
+    benchmark_result_frontier,
+    build_benchmark_summary,
+)
 
 
 def test_pack_and_unpack_binary_weight_round_trip_sign_and_scale() -> None:
@@ -51,3 +56,19 @@ def test_triton_packed_binary_linear_matches_reference() -> None:
     max_abs_diff = float(torch.max(torch.abs(triton_output - reference)).item())
 
     assert max_abs_diff < 2e-2
+
+
+def test_kernel_benchmark_summary_includes_frontier() -> None:
+    results = [
+        BenchmarkResult(256, 1024, 1024, 1.5, 0.75, 2.0, 0.0020),
+        BenchmarkResult(512, 2048, 2048, 2.4, 1.0, 2.4, 0.0030),
+        BenchmarkResult(128, 512, 512, 0.9, 0.6, 1.5, 0.0010),
+    ]
+
+    frontier = benchmark_result_frontier(results)
+    summary = build_benchmark_summary(results)
+
+    assert len(frontier) >= 2
+    assert summary["candidate_count"] == 3
+    assert len(summary["pareto_frontier"]) == len(frontier)
+    assert summary["best_speedup_candidates"][0]["speedup"] == 2.4

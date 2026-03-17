@@ -12,6 +12,7 @@ import torch
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from torch import nn
 
+from output_paths import checkpoint_root
 from regression_data import RegressionDataConfig, RegressionDataModule
 
 
@@ -324,7 +325,7 @@ def train_regression_model(
     model = build_lightning_model(data_module, training_config, model_builder)
     parameter_count = _count_model_parameters(model)
 
-    with tempfile.TemporaryDirectory() as checkpoint_dir:
+    with tempfile.TemporaryDirectory(dir=str(checkpoint_root())) as checkpoint_dir:
         checkpoint_callback = ModelCheckpoint(
             dirpath=checkpoint_dir,
             monitor="val_loss",

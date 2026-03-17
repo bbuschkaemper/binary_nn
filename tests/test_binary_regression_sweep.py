@@ -12,6 +12,7 @@ if str(SRC_DIR) not in sys.path:
 
 from run_binary_regression_sweep import (
     BinarySweepSummary,
+    build_sweep_summary,
     pareto_frontier,
     sweep_summary_to_record,
 )
@@ -76,3 +77,39 @@ def test_sweep_summary_to_record_serializes_shortcut_flag() -> None:
 
     assert record["hidden_dims"] == [8]
     assert record["use_input_shortcut"] is False
+
+
+def test_build_sweep_summary_includes_frontier_and_dense_reference() -> None:
+    class _Metrics:
+        def __init__(self, rmse: float, r2: float) -> None:
+            self.rmse = rmse
+            self.r2 = r2
+
+    class _Runtime:
+        def __init__(self, total_seconds: float, parameter_count: int) -> None:
+            self.total_seconds = total_seconds
+            self.parameter_count = parameter_count
+
+    class _Training:
+        def __init__(self) -> None:
+            self.hidden_dims = (64, 32)
+            self.learning_rate = 1e-3
+            self.epochs = 75
+
+    class _DenseResult:
+        def __init__(self) -> None:
+            self.test_metrics = _Metrics(rmse=14.9, r2=0.9956)
+            self.runtime = _Runtime(total_seconds=8.53, parameter_count=2817)
+            self.training_config = _Training()
+
+    summaries = [
+        BinarySweepSummary((8,), 3e-3, 75, True, 12.4, 0.9970, 6.3, 108),
+        BinarySweepSummary((8,), 3e-3, 40, True, 18.0, 0.9930, 3.8, 108),
+    ]
+
+    summary = build_sweep_summary(_DenseResult(), summaries)
+
+    assert summary["candidate_count"] == 2
+    assert summary["dense_reference"]["hidden_dims"] == [64, 32]
+    assert len(summary["pareto_frontier"]) == 2
+    assert summary["best_rmse_candidates"][0]["rmse"] == 12.4

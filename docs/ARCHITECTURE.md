@@ -58,6 +58,11 @@ These two files are the central backbone of the regression proof of concept.
   - shared trained-model inference timing utilities
   - common record schema for latency plus quality metrics
   - artifact export helpers for model-level benchmark data
+  - per-batch frontier extraction and binary ablation matrix summaries
+
+- `src/output_paths.py`
+  - centralizes output routing under `/mnt`
+  - keeps artifacts and checkpoints out of the repository tree
 
 These files define the current architecture and the systems path.
 
@@ -75,6 +80,7 @@ These files define the current architecture and the systems path.
   - prints task-quality deltas
   - prints runtime deltas
   - prints trained-model inference benchmark records by default
+  - writes a comparison bundle plus inference benchmark artifacts under `/mnt`
 
 - `src/run_binary_regression_sweep.py`
   - sweeps binary architecture and optimization settings
@@ -87,6 +93,7 @@ These files are the normal top-level workflow surface.
 
 - `src/benchmark_packed_binary_kernels.py`
   - microbenchmark for the packed Triton binary linear kernel
+  - exports JSON, CSV, summary, and frontier artifacts under `/mnt`
 
 - `src/benchmark_model_inference.py`
   - trained-model benchmark for end-to-end dense and binary inference
@@ -129,7 +136,8 @@ Important detail:
 -> compare task metrics
 -> compare runtimes
 -> benchmark trained-model inference using
-   `model_inference_benchmarking.py`
+  `model_inference_benchmarking.py`
+-> write comparison and inference artifacts under `/mnt`
 
 ### 3.4 Sweep flow
 
@@ -147,6 +155,7 @@ Important detail:
 -> benchmark unpacked reference path
 -> benchmark Triton path
 -> compare latency and numerical error
+-> export raw records and summary artifacts under `/mnt`
 
 ### 3.6 Trained-model inference benchmark flow
 
@@ -241,6 +250,7 @@ Typical examples:
 - add export fields
 - add new benchmark records
 - add frontier extraction logic
+- change the default artifact layout under `/mnt`
 
 ## 6. Important Current Assumptions
 

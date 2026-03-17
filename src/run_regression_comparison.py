@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from model_inference_benchmarking import (
     InferenceBenchmarkConfig,
     ModelInferenceBenchmarkRecord,
     benchmark_regression_run_result,
+    build_model_inference_summary,
+    model_inference_record_to_dict,
+    write_model_inference_benchmark_csv,
+    write_model_inference_benchmark_json,
+    write_model_inference_frontier_csv,
+    write_model_inference_summary_json,
 )
+from output_paths import ARTIFACTS_DIRNAME, resolve_output_path
 from regression_data import RegressionDataConfig
 from regression_experiment import RegressionRunResult, TrainingConfig
 from run_binary_regression import (
@@ -85,6 +94,67 @@ class RegressionComparisonResult:
             self.binary_result.runtime.parameter_count
             - self.dense_result.runtime.parameter_count
         )
+
+
+def regression_run_result_to_dict(result: RegressionRunResult) -> dict[str, object]:
+    return {
+        "device": result.device,
+        "training_config": {
+            "hidden_dims": list(result.training_config.hidden_dims),
+            "learning_rate": result.training_config.learning_rate,
+            "weight_decay": result.training_config.weight_decay,
+            "epochs": result.training_config.epochs,
+            "seed": result.training_config.seed,
+        },
+        "data_config": asdict(result.data_config),
+        "history": result.history,
+        "test_loss": result.test_loss,
+        "test_metrics": asdict(result.test_metrics),
+        "naive_test_metrics": asdict(result.naive_test_metrics),
+        "runtime": asdict(result.runtime),
+    }
+
+
+def regression_comparison_result_to_dict(
+    comparison: RegressionComparisonResult,
+) -> dict[str, object]:
+    result = {
+        "dense_result": regression_run_result_to_dict(comparison.dense_result),
+        "binary_result": regression_run_result_to_dict(comparison.binary_result),
+        "deltas": {
+            "test_loss": comparison.test_loss_delta,
+            "mse": comparison.mse_delta,
+            "mae": comparison.mae_delta,
+            "rmse": comparison.rmse_delta,
+            "r2": comparison.r2_delta,
+            "fit_seconds": comparison.fit_time_delta,
+            "test_seconds": comparison.test_time_delta,
+            "predict_seconds": comparison.predict_time_delta,
+            "total_seconds": comparison.total_time_delta,
+            "parameter_count": comparison.parameter_count_delta,
+        },
+    }
+    if comparison.inference_benchmark_records is not None:
+        result["inference_benchmark"] = {
+            "records": [
+                model_inference_record_to_dict(record)
+                for record in comparison.inference_benchmark_records
+            ],
+            "summary": build_model_inference_summary(
+                comparison.inference_benchmark_records
+            ),
+        }
+    return result
+
+
+def write_regression_comparison_json(
+    comparison: RegressionComparisonResult,
+    output_path: Path,
+) -> None:
+    output_path.write_text(
+        json.dumps(regression_comparison_result_to_dict(comparison), indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def compare_dense_and_binary_regression(
@@ -259,6 +329,36 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--inference-benchmark-iterations", type=int, default=50)
     parser.add_argument("--inference-benchmark-warmup", type=int, default=10)
+    parser.add_argument(
+        "--summary-json-out",
+        type=Path,
+        default=Path("regression_comparison_summary.json"),
+        help="Write the comparison bundle JSON under /mnt by default.",
+    )
+    parser.add_argument(
+        "--inference-json-out",
+        type=Path,
+        default=Path("regression_comparison_inference.json"),
+        help="Write inference benchmark records JSON when benchmarking is enabled.",
+    )
+    parser.add_argument(
+        "--inference-csv-out",
+        type=Path,
+        default=Path("regression_comparison_inference.csv"),
+        help="Write inference benchmark records CSV when benchmarking is enabled.",
+    )
+    parser.add_argument(
+        "--inference-summary-json-out",
+        type=Path,
+        default=Path("regression_comparison_inference_summary.json"),
+        help="Write inference benchmark summary JSON when benchmarking is enabled.",
+    )
+    parser.add_argument(
+        "--inference-frontier-csv-out",
+        type=Path,
+        default=Path("regression_comparison_inference_frontier.csv"),
+        help="Write inference benchmark frontier CSV when benchmarking is enabled.",
+    )
     return parser
 
 
@@ -413,6 +513,58 @@ def main() -> None:
     if comparison.inference_benchmark_records:
         print()
         _print_inference_benchmark_records(comparison.inference_benchmark_records)
+
+    summary_json_out = resolve_output_path(
+        args.summary_json_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="regression_comparison_summary.json",
+    )
+    write_regression_comparison_json(comparison, summary_json_out)
+    print()
+    print(f"Wrote comparison summary to {summary_json_out}")
+
+    if comparison.inference_benchmark_records:
+        inference_json_out = resolve_output_path(
+            args.inference_json_out,
+            default_subdir=ARTIFACTS_DIRNAME,
+            default_name="regression_comparison_inference.json",
+        )
+        inference_csv_out = resolve_output_path(
+            args.inference_csv_out,
+            default_subdir=ARTIFACTS_DIRNAME,
+            default_name="regression_comparison_inference.csv",
+        )
+        inference_summary_json_out = resolve_output_path(
+            args.inference_summary_json_out,
+            default_subdir=ARTIFACTS_DIRNAME,
+            default_name="regression_comparison_inference_summary.json",
+        )
+        inference_frontier_csv_out = resolve_output_path(
+            args.inference_frontier_csv_out,
+            default_subdir=ARTIFACTS_DIRNAME,
+            default_name="regression_comparison_inference_frontier.csv",
+        )
+
+        write_model_inference_benchmark_json(
+            comparison.inference_benchmark_records, inference_json_out
+        )
+        write_model_inference_benchmark_csv(
+            comparison.inference_benchmark_records, inference_csv_out
+        )
+        write_model_inference_summary_json(
+            comparison.inference_benchmark_records, inference_summary_json_out
+        )
+        write_model_inference_frontier_csv(
+            comparison.inference_benchmark_records, inference_frontier_csv_out
+        )
+        print(f"Wrote comparison inference JSON to {inference_json_out}")
+        print(f"Wrote comparison inference CSV to {inference_csv_out}")
+        print(
+            f"Wrote comparison inference summary to {inference_summary_json_out}"
+        )
+        print(
+            f"Wrote comparison inference frontier CSV to {inference_frontier_csv_out}"
+        )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 
+from output_paths import ARTIFACTS_DIRNAME, resolve_output_path
 from regression_data import RegressionDataConfig
+from regression_experiment import RegressionRunResult
 from regression_experiment import TrainingConfig
 from run_binary_regression import train_binary_regression
 from run_regression_baseline import train_regression_baseline
@@ -85,6 +87,41 @@ def sweep_summary_to_record(summary: BinarySweepSummary) -> dict[str, object]:
     }
 
 
+def _run_result_to_record(result: RegressionRunResult) -> dict[str, object]:
+    return {
+        "hidden_dims": list(result.training_config.hidden_dims),
+        "learning_rate": result.training_config.learning_rate,
+        "epochs": result.training_config.epochs,
+        "use_input_shortcut": False,
+        "rmse": result.test_metrics.rmse,
+        "r2": result.test_metrics.r2,
+        "total_seconds": result.runtime.total_seconds,
+        "parameter_count": result.runtime.parameter_count,
+    }
+
+
+def build_sweep_summary(
+    dense_result: RegressionRunResult,
+    summaries: list[BinarySweepSummary],
+) -> dict[str, object]:
+    best_rmse = sorted(summaries, key=lambda item: (item.rmse, item.total_seconds))[:5]
+    fastest = sorted(summaries, key=lambda item: (item.total_seconds, item.rmse))[:5]
+    frontier = pareto_frontier(summaries)
+    return {
+        "dense_reference": _run_result_to_record(dense_result),
+        "candidate_count": len(summaries),
+        "best_rmse_candidates": [
+            sweep_summary_to_record(candidate) for candidate in best_rmse
+        ],
+        "fastest_candidates": [
+            sweep_summary_to_record(candidate) for candidate in fastest
+        ],
+        "pareto_frontier": [
+            sweep_summary_to_record(candidate) for candidate in frontier
+        ],
+    }
+
+
 def _write_json(records: list[dict[str, object]], output_path: Path) -> None:
     output_path.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
 
@@ -130,8 +167,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the dense residual shortcut for all swept binary models.",
     )
-    parser.add_argument("--json-out", type=Path, default=None)
-    parser.add_argument("--csv-out", type=Path, default=None)
+    parser.add_argument("--json-out", type=Path, default=Path("binary_regression_sweep.json"))
+    parser.add_argument("--csv-out", type=Path, default=Path("binary_regression_sweep.csv"))
+    parser.add_argument(
+        "--summary-json-out",
+        type=Path,
+        default=Path("binary_regression_sweep_summary.json"),
+    )
+    parser.add_argument(
+        "--frontier-csv-out",
+        type=Path,
+        default=Path("binary_regression_sweep_frontier.csv"),
+    )
     return parser
 
 
@@ -214,10 +261,39 @@ def main() -> None:
         _print_candidate("frontier", candidate)
 
     records = [sweep_summary_to_record(summary) for summary in summaries]
-    if args.json_out is not None:
-        _write_json(records, args.json_out)
-    if args.csv_out is not None:
-        _write_csv(records, args.csv_out)
+    summary = build_sweep_summary(dense_result, summaries)
+
+    json_out = resolve_output_path(
+        args.json_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="binary_regression_sweep.json",
+    )
+    csv_out = resolve_output_path(
+        args.csv_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="binary_regression_sweep.csv",
+    )
+    summary_json_out = resolve_output_path(
+        args.summary_json_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="binary_regression_sweep_summary.json",
+    )
+    frontier_csv_out = resolve_output_path(
+        args.frontier_csv_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="binary_regression_sweep_frontier.csv",
+    )
+
+    _write_json(records, json_out)
+    _write_csv(records, csv_out)
+    _write_json(summary, summary_json_out)
+    _write_csv(summary["pareto_frontier"], frontier_csv_out)
+
+    print()
+    print(f"Wrote sweep records to {json_out}")
+    print(f"Wrote sweep CSV to {csv_out}")
+    print(f"Wrote sweep summary to {summary_json_out}")
+    print(f"Wrote sweep frontier CSV to {frontier_csv_out}")
 
 
 if __name__ == "__main__":

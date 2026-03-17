@@ -61,6 +61,10 @@ python src/run_regression_comparison.py --samples 4096 --dense-epochs 75 --binar
 
 The report includes parameter counts and wall-clock fit, test, predict, and total times so you can see whether a wider binary network still has a runtime advantage on your hardware.
 
+It now also writes a comparison bundle under `/mnt/binary_nn/artifacts/`, plus
+inference benchmark JSON, CSV, summary JSON, and frontier CSV when the
+inference benchmark section is enabled.
+
 ## Binary Sweep
 
 Run a curated binary sweep and print the current Pareto frontier:
@@ -79,6 +83,9 @@ ablation:
 python src/run_binary_regression_sweep.py --disable-binary-shortcut --json-out sweep.json --csv-out sweep.csv
 ```
 
+Sweep artifacts now default to /mnt under /mnt/binary_nn/artifacts/, including
+full JSON and CSV outputs plus a summary JSON and frontier CSV.
+
 ## Triton Kernel Benchmark
 
 Benchmark the packed Triton inference path for binary linear layers on larger
@@ -90,6 +97,9 @@ python src/benchmark_packed_binary_kernels.py
 
 This keeps training on the standard PyTorch path but benchmarks an eval-only,
 packed-sign inference kernel implemented with Triton.
+
+The kernel benchmark now also writes JSON, CSV, summary JSON, and frontier CSV
+artifacts under `/mnt/binary_nn/artifacts/` by default.
 
 On the current `NVIDIA L4` test machine, the first benchmark run showed about
 `2.33x` speedup at shape `(256, 1024, 1024)` and about `2.38x` at shape
@@ -108,7 +118,11 @@ This benchmark now trains the compared models on the regression task first,
 then emits both quality metrics and end-to-end latency records so architecture
 and systems tradeoffs can be judged in one artifact.
 
-The latest run also wrote machine-readable outputs to `artifacts/` and showed
+By default it now also runs the binary shortcut on or off and Triton on or off
+ablation matrix, then writes the full records, a summary JSON, and a frontier
+CSV to /mnt under /mnt/binary_nn/artifacts/.
+
+The latest run also wrote machine-readable outputs to `/mnt/binary_nn/artifacts/` and showed
 that the Triton path survives end to end at the model level. For example, on an
 `NVIDIA L4` with `input_dim=1024` and `hidden=1024`, the binary model with
 shortcut and Triton reached about `0.1108ms` vs `0.1521ms` without Triton at

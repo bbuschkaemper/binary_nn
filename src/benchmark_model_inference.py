@@ -10,7 +10,10 @@ from model_inference_benchmarking import (
     benchmark_regression_run_result,
     write_model_inference_benchmark_csv,
     write_model_inference_benchmark_json,
+    write_model_inference_frontier_csv,
+    write_model_inference_summary_json,
 )
+from output_paths import ARTIFACTS_DIRNAME, resolve_output_path
 from regression_data import RegressionDataConfig
 from regression_experiment import TrainingConfig
 from run_binary_regression import train_binary_regression
@@ -40,9 +43,31 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--include-shortcut-ablation", action="store_true")
-    parser.add_argument("--json-out", type=str, default=None)
-    parser.add_argument("--csv-out", type=str, default=None)
+    parser.add_argument(
+        "--skip-shortcut-ablation",
+        action="store_true",
+        help="Skip training the binary no-shortcut variant in the ablation matrix.",
+    )
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        default=Path("trained_model_benchmark.json"),
+    )
+    parser.add_argument(
+        "--csv-out",
+        type=Path,
+        default=Path("trained_model_benchmark.csv"),
+    )
+    parser.add_argument(
+        "--summary-json-out",
+        type=Path,
+        default=Path("trained_model_benchmark_summary.json"),
+    )
+    parser.add_argument(
+        "--frontier-csv-out",
+        type=Path,
+        default=Path("trained_model_benchmark_frontier.csv"),
+    )
     return parser
 
 
@@ -100,7 +125,7 @@ def main() -> None:
         )
     )
 
-    if args.include_shortcut_ablation:
+    if not args.skip_shortcut_ablation:
         binary_no_shortcut_result = train_binary_regression(
             data_config=data_config,
             training_config=TrainingConfig(
@@ -131,10 +156,37 @@ def main() -> None:
             f"latency={record.latency_ms:.4f}ms rmse={record.test_rmse:.4f} r2={record.test_r2:.4f}"
         )
 
-    if args.json_out is not None:
-        write_model_inference_benchmark_json(records, Path(args.json_out))
-    if args.csv_out is not None:
-        write_model_inference_benchmark_csv(records, Path(args.csv_out))
+    json_out = resolve_output_path(
+        args.json_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="trained_model_benchmark.json",
+    )
+    csv_out = resolve_output_path(
+        args.csv_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="trained_model_benchmark.csv",
+    )
+    summary_json_out = resolve_output_path(
+        args.summary_json_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="trained_model_benchmark_summary.json",
+    )
+    frontier_csv_out = resolve_output_path(
+        args.frontier_csv_out,
+        default_subdir=ARTIFACTS_DIRNAME,
+        default_name="trained_model_benchmark_frontier.csv",
+    )
+
+    write_model_inference_benchmark_json(records, json_out)
+    write_model_inference_benchmark_csv(records, csv_out)
+    write_model_inference_summary_json(records, summary_json_out)
+    write_model_inference_frontier_csv(records, frontier_csv_out)
+
+    print()
+    print(f"Wrote model benchmark JSON to {json_out}")
+    print(f"Wrote model benchmark CSV to {csv_out}")
+    print(f"Wrote model benchmark summary to {summary_json_out}")
+    print(f"Wrote model benchmark frontier CSV to {frontier_csv_out}")
 
 
 if __name__ == "__main__":
