@@ -29,6 +29,13 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         description="Train dense and binary regressors, then benchmark end-to-end inference with quality metrics."
     )
     parser.add_argument("--samples", type=int, default=4096)
+    parser.add_argument("--features", type=int, default=10)
+    parser.add_argument(
+        "--informative-features",
+        type=int,
+        default=None,
+        help="Number of informative features for the synthetic regression task. Defaults to the full feature count.",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--noise", type=float, default=12.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -43,6 +50,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument(
+        "--matmul-precision",
+        choices=("highest", "high", "medium"),
+        default=None,
+        help="Optional torch float32 matmul precision setting for GPU benchmarking.",
+    )
     parser.add_argument(
         "--skip-shortcut-ablation",
         action="store_true",
@@ -73,10 +86,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_argument_parser().parse_args()
+    if args.matmul_precision is not None:
+        torch.set_float32_matmul_precision(args.matmul_precision)
+
+    informative_features = (
+        args.informative_features
+        if args.informative_features is not None
+        else args.features
+    )
     data_config = RegressionDataConfig(
         n_samples=args.samples,
-        n_features=10,
-        n_informative=10,
+        n_features=args.features,
+        n_informative=informative_features,
         noise=args.noise,
         batch_size=args.batch_size,
         random_state=args.seed,
@@ -148,6 +169,8 @@ def main() -> None:
 
     print("End-to-end model inference benchmark")
     print(f"Benchmark device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    if args.matmul_precision is not None:
+        print(f"Float32 matmul precision: {args.matmul_precision}")
     print()
     for record in records:
         print(

@@ -52,10 +52,20 @@ The repository currently has four working layers of functionality.
 - Model-level inference benchmark exists for trained dense and binary models.
 - Model-level inference benchmark now automates the shortcut and Triton ablation
   matrix by default.
+- Model-level inference benchmark now also supports configurable regression
+  feature count, so larger-width trained-model runs can be benchmarked without
+  editing code.
+- Model-level inference benchmark now also supports configurable float32
+  matmul precision, which matters on Tensor Core GPUs for fair dense versus
+  binary systems comparisons.
 - The dense-vs-binary comparison script now includes a model-level inference
   benchmark section by default and now emits a comparison artifact bundle.
 - Generated artifacts and Lightning checkpoints are now routed under `/mnt`, not
   back into the repository tree.
+- The latest checked-in bundle under `/mnt/binary_nn/artifacts/smoke/` should be
+  treated as smoke validation only. It is useful for verifying export paths and
+  benchmark plumbing, but it is not the decision-grade baseline for binary
+  quality or Triton speedups.
 
 ## 2. Most Important Files
 
@@ -94,6 +104,8 @@ On the regression task used in the repo:
 - binary hidden dims `(8,)`
 - learning rate `3e-3`
 - epochs `75`
+- RMSE `12.4447`
+- total runtime `8.5400s`
 
 This configuration is slightly better than the dense baseline on quality while
 remaining very close on runtime.
@@ -105,6 +117,8 @@ On the same task:
 - binary hidden dims `(8,)`
 - learning rate `3e-3`
 - epochs `40`
+- RMSE `15.1069`
+- total runtime `3.5248s`
 
 This configuration is materially faster than dense while staying close on
 accuracy.
@@ -114,10 +128,31 @@ accuracy.
 The packed Triton binary inference path is already faster than the unpacked
 reference path on larger matrix shapes.
 
+Latest larger-shape decision bundle on `NVIDIA L4`:
+
+- `(512, 2048, 2048)`: about `2.65x` speedup
+- `(1024, 4096, 4096)`: about `2.54x` speedup
+- `(1024, 8192, 8192)`: about `2.72x` speedup
+- observed max absolute error stayed around `0.0018` to `0.0020`
+
 ### 3.4 End-to-end model finding
 
 The Triton advantage survives at full-model inference level, not just in an
 isolated microkernel benchmark.
+
+Important nuance from the refreshed benchmarks:
+
+- on the original tiny `10`-feature regression benchmark, latency is mostly
+  overhead-bound, so large batch sizes do not materially change the story
+- on a wider trained-model benchmark with `1024` input features and
+  hidden dims `(1024, 1024)`, Triton improves binary latency at batch sizes
+  `512`, `2048`, and `8192`, but regresses at `16384`
+- targeted profiling at shape `(16384, 1024, 1024)` shows that regression is
+  kernel-local: the packed Triton binary layer itself is slower than the
+  reference path there, not just the full model around it
+- wide dense results are highly sensitive to `torch.set_float32_matmul_precision`
+  on `NVIDIA L4`; under `medium`, the dense `(1024, 1024)` model becomes much
+  faster than the earlier default-precision measurements suggested
 
 ## 4. What Has Been Validated
 
@@ -142,6 +177,10 @@ during the recent iterations.
 The repository now emits machine-readable benchmark artifacts under `/mnt`, with
 default benchmark outputs written to `/mnt/binary_nn/artifacts/`.
 
+The latest decision-grade refresh is stored under:
+
+- `/mnt/binary_nn/artifacts/2026-03-17-decision/`
+
 ## 5. Assumptions For The Next Session
 
 The next session should assume:
@@ -150,6 +189,15 @@ The next session should assume:
   binary MLP
 - the dense shortcut is currently a feature, not a bug or temporary hack
 - the Triton packed path is real and worth extending
+- the smoke artifacts are still validation-only, but a decision-grade refresh
+  now exists under `/mnt/binary_nn/artifacts/2026-03-17-decision/`
+- the small `10`-feature model benchmark is useful for workflow validation, but
+  the wider `1024`-feature benchmark is the more representative systems read
+- the current systems question is no longer whether Triton helps at all; it is
+  why the current kernel loses at shape `(16384, 1024, 1024)`
+- future wide dense-versus-binary comparisons should set float32 matmul
+  precision explicitly, preferably `high` or `medium`, to avoid undercounting
+  dense and binary no-Triton GEMM throughput on Tensor Core GPUs
 - the next major design decision is not whether to do custom kernels, but
   whether to stay strict binary or begin a parallel ternary or int2 path
 

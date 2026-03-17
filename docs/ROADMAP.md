@@ -33,6 +33,25 @@ not just architecture experiments.
 These are the highest-priority next tasks if work resumes without changing the
 overall direction.
 
+Operational caveat:
+
+- the latest stored outputs under `/mnt/binary_nn/artifacts/smoke/` are smoke
+  runs, not the full decision-grade benchmark bundle
+- use them to validate export and reporting paths only
+- do not use them to update the binary versus dense quality story or the Triton
+  speedup story
+
+### 2.0 Refresh the decision-grade artifact bundle
+
+- rerun the binary sweep on the normal grid so the frontier reflects real epoch
+  budgets rather than smoke settings
+- rerun the trained-model inference benchmark on the default batch-size matrix
+  and keep the shortcut and Triton ablations enabled
+- rerun the packed kernel benchmark on the large CUDA shapes that match the
+  documented systems story
+- write these outputs to the normal artifact location under `/mnt/binary_nn/artifacts/`
+  and preserve `smoke/` as a separate validation-only namespace
+
 ### 2.1 Keep benchmark outputs decision-ready
 
 - keep exporting JSON and CSV for all important sweeps and benchmarks
@@ -54,6 +73,11 @@ overall direction.
   change it
 - extend the packed inference path only where it can be benchmarked clearly
 - prefer end-to-end model wins over microkernel wins when choosing priorities
+- treat `torch.set_float32_matmul_precision('high'|'medium')` as part of fair
+  GPU benchmarking hygiene for wide dense-versus-binary comparisons
+- prioritize the `(16384, 1024, 1024)` kernel regression specifically, because
+  profiling now shows that this is a kernel-local loss, not just full-model
+  overhead
 
 ### 2.4 Prepare the next representation baseline
 
@@ -144,10 +168,10 @@ If the hybrid path is chosen, the first milestone should be:
 
 If work resumes now, the recommended order is:
 
-1. add artifact-level summary or frontier extraction for the existing binary
-  sweep and inference outputs
-2. run a disciplined shortcut and Triton ablation matrix to lock in the binary
-  baseline story
+1. optimize or retune the packed Triton kernel for the regressing
+  `(16384, 1024, 1024)` operating point
+2. keep wide dense-versus-binary comparisons on explicit `high` or `medium`
+  matmul precision so the baseline story stays fair
 3. add one minimal ternary or int2 layer prototype with matching benchmark
   hooks
 4. compare binary versus ternary on kernel behavior first, and only then on

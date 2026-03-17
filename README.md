@@ -118,15 +118,59 @@ This benchmark now trains the compared models on the regression task first,
 then emits both quality metrics and end-to-end latency records so architecture
 and systems tradeoffs can be judged in one artifact.
 
+For larger, more realistic trained-model benchmarks, you can now increase the
+synthetic regression width directly from the CLI:
+
+```bash
+python src/benchmark_model_inference.py \
+    --features 1024 \
+    --informative-features 1024 \
+    --dense-hidden-dims 1024,1024 \
+    --binary-hidden-dims 1024,1024 \
+    --benchmark-batch-sizes 512 2048 8192 16384
+```
+
 By default it now also runs the binary shortcut on or off and Triton on or off
 ablation matrix, then writes the full records, a summary JSON, and a frontier
 CSV to /mnt under /mnt/binary_nn/artifacts/.
 
-The latest run also wrote machine-readable outputs to `/mnt/binary_nn/artifacts/` and showed
-that the Triton path survives end to end at the model level. For example, on an
-`NVIDIA L4` with `input_dim=1024` and `hidden=1024`, the binary model with
-shortcut and Triton reached about `0.1108ms` vs `0.1521ms` without Triton at
-batch `512`, and about `0.2611ms` vs `0.5287ms` at batch `2048`.
+For fair wide-model benchmarking on Tensor Core GPUs, set matmul precision
+explicitly:
+
+```bash
+python src/benchmark_model_inference.py \
+    --matmul-precision medium \
+    --features 1024 \
+    --informative-features 1024 \
+    --dense-hidden-dims 1024,1024 \
+    --binary-hidden-dims 1024,1024 \
+    --benchmark-batch-sizes 512 2048 8192 16384
+```
+
+The latest decision-grade bundle was written to
+`/mnt/binary_nn/artifacts/2026-03-17-decision/`.
+
+Two takeaways from that refresh on `NVIDIA L4`:
+
+- on the original small `10`-feature benchmark, the model path is largely
+    overhead-bound, so latency remains almost flat even as benchmark batch size
+    increases
+- on the earlier wide `1024`-feature benchmark, Triton improved the binary model
+    relative to binary no-Triton through batch `8192`, but that comparison left
+    dense matmul precision at the default setting
+
+After rerunning the wide benchmark with `--matmul-precision medium`, the dense
+baseline became much faster:
+
+- dense `(1024, 1024)` reached about `0.1861ms` at batch `512`, `0.2900ms` at
+    `2048`, `1.5427ms` at `8192`, and `3.6230ms` at `16384`
+- binary shortcut with Triton reached about `0.2415ms`, `0.5634ms`, `3.6516ms`,
+    and `12.6919ms` at those same batch sizes
+
+At batch `16384`, the current Triton path still regresses badly. Targeted
+profiling showed that this is already visible at the isolated binary-layer
+kernel shape `(16384, 1024, 1024)`, where the Triton kernel itself loses to the
+reference path. That is now the main systems debugging target.
 
 The dense-vs-binary comparison script now also includes a model-level inference
 benchmark section by default. You can disable it with:

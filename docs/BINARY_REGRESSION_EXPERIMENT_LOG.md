@@ -277,6 +277,214 @@ binary model is clearly undertrained at `10` epochs. It is mainly a validation
 that the comparison workflow now reports trained-model latency and quality in a
 single run.
 
+### 3.11 Refreshed decision-grade artifact bundle and larger-width benchmarking
+
+The next step after marking the saved `smoke/` bundle as validation-only was to
+rerun the main artifact flows under a non-smoke namespace:
+
+- `/mnt/binary_nn/artifacts/2026-03-17-decision/binary_sweep_*`
+- `/mnt/binary_nn/artifacts/2026-03-17-decision/model_benchmark_default_*`
+- `/mnt/binary_nn/artifacts/2026-03-17-decision/model_benchmark_wide_*`
+- `/mnt/binary_nn/artifacts/2026-03-17-decision/kernel_benchmark_large_*`
+
+The binary sweep reconfirmed the earlier frontier rather than overturning it.
+
+Dense reference on the standard regression task:
+
+- hidden dims `(64, 32)`
+- learning rate `1e-3`
+- epochs `75`
+- `RMSE 14.9243`
+- total runtime `6.6829s`
+
+Best binary quality point from the refreshed sweep:
+
+- hidden dims `(8,)`
+- learning rate `3e-3`
+- epochs `75`
+- `RMSE 12.4447`
+- total runtime `8.5400s`
+
+Best balanced frontier point from the refreshed sweep:
+
+- hidden dims `(16,)`
+- learning rate `3e-3`
+- epochs `75`
+- `RMSE 12.7292`
+- total runtime `6.4044s`
+
+Fast speed-oriented point from the refreshed sweep:
+
+- hidden dims `(8,)`
+- learning rate `3e-3`
+- epochs `40`
+- `RMSE 15.1069`
+- total runtime `3.5248s`
+
+Interpretation:
+
+- the binary shortcut architecture remains the right baseline
+- the `(8,)` and `(16,)` configurations still dominate the larger hidden-dim
+  options on this task
+- the repo now has a fresh non-smoke binary frontier artifact to use for later
+  ternary or int2 comparisons
+
+The trained-model inference benchmark was then rerun in two modes.
+
+Default small-model benchmark, using the original `10`-feature task but larger
+benchmark batch sizes:
+
+- dense latency stayed around `0.18ms` from batch `512` through `16384`
+- binary with shortcut and Triton stayed around `0.178ms` to `0.189ms`
+- binary without shortcut and Triton was fastest, around `0.126ms` to `0.133ms`,
+  but much worse on quality with `RMSE 57.08`
+
+Interpretation:
+
+- the tiny trained-model benchmark is mostly overhead-bound
+- it is still useful for validating that the shortcut and Triton ablations are
+  exported correctly
+- it is not a strong proxy for realistic systems scaling
+
+To address that limitation, `src/benchmark_model_inference.py` was extended to
+accept `--features` and `--informative-features`, making it possible to run a
+wider trained-model benchmark without code edits.
+
+Wider trained-model benchmark on `NVIDIA L4` with:
+
+- `features=1024`
+- dense hidden dims `(1024, 1024)`
+- binary hidden dims `(1024, 1024)`
+- benchmark batches `512`, `2048`, `8192`, `16384`
+
+Measured results for the binary model with shortcut:
+
+- batch `512`: Triton `0.2406ms` vs no-Triton `0.4891ms`, about `2.03x` faster
+- batch `2048`: Triton `0.5729ms` vs no-Triton `0.8206ms`, about `1.43x` faster
+- batch `8192`: Triton `3.5930ms` vs no-Triton `5.1903ms`, about `1.44x` faster
+- batch `16384`: Triton `12.7212ms` vs no-Triton `9.1373ms`, a regression
+
+Quality on that wider benchmark was also striking:
+
+- dense `RMSE 577.75`, `R2 0.9074`
+- binary with shortcut `RMSE 18.11`, `R2 0.9999`
+- binary without shortcut `RMSE 227.91`, `R2 0.9856`
+
+Interpretation:
+
+- the shortcut is still a major quality feature in the wider setting
+- Triton clearly helps through moderate and fairly large batch sizes
+- the current implementation has a high-batch scaling cliff that now deserves
+  profiling before any major kernel rewrite or representation pivot
+
+The larger packed-kernel benchmark reinforced the systems story directly.
+
+Measured packed-kernel results on `NVIDIA L4`:
+
+- `(512, 2048, 2048)`: `2.65x` speedup, max abs diff `0.001817`
+- `(1024, 4096, 4096)`: `2.54x` speedup, max abs diff `0.001816`
+- `(2048, 4096, 4096)`: `2.15x` speedup, max abs diff `0.001986`
+- `(1024, 8192, 8192)`: `2.72x` speedup, max abs diff `0.001882`
+
+This refresh substantially strengthens the repo's current evidence base:
+
+- the binary training frontier is stable
+- the packed Triton kernel keeps winning by roughly `2x` to `2.7x` on larger
+  synthetic shapes
+- end-to-end model wins are real on wider models, but not monotonic at the
+  largest tested batch size
+
+### 3.12 Isolated the high-batch regression and corrected dense benchmarking precision
+
+The next questions after the wider benchmark refresh were:
+
+1. is the batch-`16384` Triton regression a full-model effect or a kernel-local one?
+2. were the wide dense baselines being under-measured on the `NVIDIA L4`
+   because float32 matmul precision was left at the default setting?
+
+To answer the first question, the wide binary shortcut model was profiled again
+at the exact regressing layer shape:
+
+- batch size `16384`
+- input dim `1024`
+- binary layer out dim `1024`
+
+Measured result from the isolated profile:
+
+- full model, no Triton: `8.63ms`
+- full model, Triton: `12.71ms`
+- first `BinaryLinear`, no Triton: `3.66ms`
+- first `BinaryLinear`, Triton: `5.30ms`
+- direct packed-kernel reference path: `3.53ms`
+- direct packed-kernel Triton path: `5.29ms`
+
+Interpretation:
+
+- the regression is kernel-local at `(16384, 1024, 1024)`
+- packed-weight caching is not the main problem here
+- the current Triton kernel loses directly to the reference GEMM-backed path at
+  that specific high-batch, moderate-width operating point
+
+That means the next systems optimization should focus on:
+
+- kernel tiling or autotune coverage for very large `M` with moderate `K` and `N`
+- not on model-level bookkeeping or shortcut logic
+
+To answer the second question, the wide dense baseline was benchmarked on the
+same trained weights under three precision settings:
+
+- `highest`
+- `high`
+- `medium`
+
+Measured dense latencies for hidden dims `(1024, 1024)`:
+
+- batch `512`: `0.2120ms` at `highest`, `0.1826ms` at `high`, `0.1823ms` at `medium`
+- batch `2048`: `0.7767ms` at `highest`, `0.3487ms` at `high`, `0.3667ms` at `medium`
+- batch `8192`: `4.2243ms` at `highest`, `1.7806ms` at `high`, `1.7040ms` at `medium`
+- batch `16384`: `7.9693ms` at `highest`, `3.7374ms` at `high`, `3.6229ms` at `medium`
+
+Interpretation:
+
+- the earlier wide dense results were materially under-measured
+- on `NVIDIA L4`, leaving float32 matmul precision at the default setting makes
+  the dense wide baseline look much slower than it should
+- future wide model comparisons in this repo should set matmul precision
+  explicitly, preferably `high` or `medium`
+
+After adding a `--matmul-precision` option to
+`src/benchmark_model_inference.py`, the full wide benchmark was rerun with
+`--matmul-precision medium`.
+
+Updated wide-model comparison under `medium` precision:
+
+- dense `(1024, 1024)` at batch `512`: `0.1861ms`
+- dense `(1024, 1024)` at batch `2048`: `0.2900ms`
+- dense `(1024, 1024)` at batch `8192`: `1.5427ms`
+- dense `(1024, 1024)` at batch `16384`: `3.6230ms`
+
+- binary shortcut with Triton at batch `512`: `0.2415ms`
+- binary shortcut with Triton at batch `2048`: `0.5634ms`
+- binary shortcut with Triton at batch `8192`: `3.6516ms`
+- binary shortcut with Triton at batch `16384`: `12.6919ms`
+
+This materially changes the systems interpretation:
+
+- the binary shortcut model still dominates on quality in the wide regression
+  setting
+- the packed Triton path still helps the binary model relative to binary
+  no-Triton at small batches
+- but once dense matmul precision is configured fairly, the wide dense baseline
+  is faster than the quality-preserving binary shortcut model across all tested
+  batches on this machine
+
+That means the repo's current systems story is now more precise:
+
+- binary training quality is strong
+- packed binary kernels are strong on larger synthetic shapes
+- but the current wide end-to-end model path is not yet beating a properly
+  configured dense baseline on `NVIDIA L4`
+
 ## 4. Best Measured Configurations So Far
 
 All numbers below are from the same generated regression task with:
