@@ -163,7 +163,13 @@ def compare_dense_and_binary_regression(
     binary_training_config: TrainingConfig | None = None,
     binary_use_input_shortcut: bool = True,
     inference_benchmark_config: InferenceBenchmarkConfig | None = None,
+    matmul_precision: str | None = None,
 ) -> RegressionComparisonResult:
+    if matmul_precision is not None:
+        import torch
+
+        torch.set_float32_matmul_precision(matmul_precision)
+
     resolved_dense_training_config = dense_training_config or TrainingConfig(
         hidden_dims=DEFAULT_DENSE_HIDDEN_DIMS
     )
@@ -289,6 +295,13 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         description="Run dense and binary regression experiments back to back."
     )
     parser.add_argument("--samples", type=int, default=100000)
+    parser.add_argument("--features", type=int, default=10)
+    parser.add_argument(
+        "--informative-features",
+        type=int,
+        default=None,
+        help="Number of informative features for the synthetic regression task. Defaults to the full feature count.",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--noise", type=float, default=12.0)
     parser.add_argument("--epochs", type=int, default=75)
@@ -330,6 +343,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inference-benchmark-iterations", type=int, default=50)
     parser.add_argument("--inference-benchmark-warmup", type=int, default=10)
     parser.add_argument(
+        "--matmul-precision",
+        choices=("highest", "high", "medium"),
+        default=None,
+        help="Optional torch float32 matmul precision setting for GPU training and inference benchmarking.",
+    )
+    parser.add_argument(
         "--summary-json-out",
         type=Path,
         default=Path("regression_comparison_summary.json"),
@@ -364,6 +383,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_argument_parser().parse_args()
+    informative_features = (
+        args.informative_features
+        if args.informative_features is not None
+        else args.features
+    )
     dense_epochs = args.dense_epochs or args.epochs
     binary_epochs = args.binary_epochs or args.epochs
     dense_learning_rate = (
@@ -387,8 +411,8 @@ def main() -> None:
 
     data_config = RegressionDataConfig(
         n_samples=args.samples,
-        n_features=10,
-        n_informative=10,
+        n_features=args.features,
+        n_informative=informative_features,
         noise=args.noise,
         batch_size=args.batch_size,
         random_state=args.seed,
@@ -421,8 +445,12 @@ def main() -> None:
         binary_training_config=binary_training_config,
         binary_use_input_shortcut=not args.disable_binary_shortcut,
         inference_benchmark_config=inference_benchmark_config,
+        matmul_precision=args.matmul_precision,
     )
 
+    if args.matmul_precision is not None:
+        print(f"Float32 matmul precision: {args.matmul_precision}")
+        print()
     _print_result_block("Dense baseline", comparison.dense_result)
     print()
     _print_result_block("Binary baseline", comparison.binary_result)

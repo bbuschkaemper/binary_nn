@@ -112,3 +112,41 @@ def test_regression_comparison_serialization_includes_inference_summary() -> Non
     assert "deltas" in serialized
     assert "inference_benchmark" in serialized
     assert serialized["inference_benchmark"]["summary"]["candidate_count"] >= 2
+
+
+def test_regression_comparison_accepts_custom_feature_counts() -> None:
+    comparison = compare_dense_and_binary_regression(
+        data_config=RegressionDataConfig(
+            n_samples=256,
+            n_features=32,
+            n_informative=32,
+            noise=8.0,
+            batch_size=64,
+            random_state=13,
+        ),
+        dense_training_config=TrainingConfig(
+            hidden_dims=(32, 16),
+            epochs=2,
+            learning_rate=1e-3,
+            seed=13,
+            accelerator="cpu",
+        ),
+        binary_training_config=TrainingConfig(
+            hidden_dims=(16,),
+            epochs=2,
+            learning_rate=3e-3,
+            seed=13,
+            accelerator="cpu",
+        ),
+        inference_benchmark_config=InferenceBenchmarkConfig(
+            batch_sizes=(16,),
+            iterations=1,
+            warmup=0,
+            seed=13,
+        ),
+    )
+
+    assert comparison.dense_result.data_config.n_features == 32
+    assert comparison.binary_result.data_config.n_features == 32
+    assert comparison.inference_benchmark_records is not None
+    assert all(record.input_dim == 32 for record in comparison.inference_benchmark_records)

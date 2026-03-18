@@ -167,10 +167,18 @@ baseline became much faster:
 - binary shortcut with Triton reached about `0.2415ms`, `0.5634ms`, `3.6516ms`,
     and `12.6919ms` at those same batch sizes
 
+The binary no-Triton path also needs the same precision normalization. On the
+same `NVIDIA L4`, moving from the default `highest` setting to `high` or
+`medium` roughly halves wide binary no-Triton latency at the larger batches.
+
 At batch `16384`, the current Triton path still regresses badly. Targeted
 profiling showed that this is already visible at the isolated binary-layer
 kernel shape `(16384, 1024, 1024)`, where the Triton kernel itself loses to the
 reference path. That is now the main systems debugging target.
+
+An initial autotune expansion improved Triton at mid-range wide batches, but it
+still does not recover the `16384 x 1024 x 1024` case, so the next step is a
+deeper kernel iteration rather than another documentation-only benchmark pass.
 
 The dense-vs-binary comparison script now also includes a model-level inference
 benchmark section by default. You can disable it with:
@@ -178,6 +186,23 @@ benchmark section by default. You can disable it with:
 ```bash
 python src/run_regression_comparison.py --skip-inference-benchmark
 ```
+
+The comparison workflow now also supports wide experiments directly:
+
+```bash
+python src/run_regression_comparison.py \
+    --features 1024 \
+    --informative-features 1024 \
+    --dense-hidden-dims 1024 1024 \
+    --binary-hidden-dims 1024 1024 \
+    --matmul-precision medium \
+    --inference-benchmark-batch-sizes 512 2048 8192 16384
+```
+
+The current code also includes a conservative runtime fallback that disables
+Triton for the known losing large-batch shape regime. That means a `triton=true`
+record at the highest tested wide batch can reflect a fallback to the reference
+path rather than actual Triton kernel execution.
 
 ## Experiment Notes
 

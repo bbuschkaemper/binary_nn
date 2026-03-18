@@ -78,6 +78,11 @@ Operational caveat:
 - prioritize the `(16384, 1024, 1024)` kernel regression specifically, because
   profiling now shows that this is a kernel-local loss, not just full-model
   overhead
+- note that the first autotune expansion improved the `2048` regime but did not
+  fix `8192` or `16384`, so the next iteration should target kernel design, not
+  just a few more config entries
+- keep the current conservative large-batch Triton fallback in place until the
+  kernel genuinely wins again at the highest tested batch
 
 ### 2.4 Prepare the next representation baseline
 
@@ -168,13 +173,17 @@ If the hybrid path is chosen, the first milestone should be:
 
 If work resumes now, the recommended order is:
 
-1. optimize or retune the packed Triton kernel for the regressing
-  `(16384, 1024, 1024)` operating point
+1. redesign or specialize the packed Triton kernel for the regressing
+  `(16384, 1024, 1024)` operating point, since the first autotune expansion was
+  insufficient
 2. keep wide dense-versus-binary comparisons on explicit `high` or `medium`
-  matmul precision so the baseline story stays fair
-3. add one minimal ternary or int2 layer prototype with matching benchmark
+  matmul precision so the baseline story stays fair for both dense and
+  binary no-Triton paths
+3. keep the conservative fallback policy until the specialized kernel is ready,
+  so wide runs do not regress catastrophically in the meantime
+4. add one minimal ternary or int2 layer prototype with matching benchmark
   hooks
-4. compare binary versus ternary on kernel behavior first, and only then on
+5. compare binary versus ternary on kernel behavior first, and only then on
   regression quality
 
 This sequence keeps the repo scientifically clean:

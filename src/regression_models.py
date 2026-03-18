@@ -77,6 +77,13 @@ class BinaryLinear(nn.Module):
         self._cached_weight_version = self.weight._version
         self._cached_weight_device = self.weight.device
 
+    def _known_triton_losing_shape(self, inputs: torch.Tensor) -> bool:
+        return (
+            inputs.shape[0] >= 16384
+            and self.in_features <= 1024
+            and self.out_features <= 1024
+        )
+
     def _should_use_packed_inference(self, inputs: torch.Tensor) -> bool:
         return (
             self.use_triton_packed_inference
@@ -84,6 +91,7 @@ class BinaryLinear(nn.Module):
             and not torch.is_grad_enabled()
             and inputs.is_cuda
             and inputs.ndim == 2
+            and not self._known_triton_losing_shape(inputs)
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:

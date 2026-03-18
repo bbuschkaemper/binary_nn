@@ -19,6 +19,7 @@ from binary_kernels import (
     packed_binary_linear_triton,
     unpack_binary_weight,
 )
+from regression_models import BinaryLinear
 from benchmark_packed_binary_kernels import (
     BenchmarkResult,
     benchmark_result_frontier,
@@ -72,3 +73,18 @@ def test_kernel_benchmark_summary_includes_frontier() -> None:
     assert summary["candidate_count"] == 3
     assert len(summary["pareto_frontier"]) == len(frontier)
     assert summary["best_speedup_candidates"][0]["speedup"] == 2.4
+
+
+def test_binary_linear_disables_triton_for_known_losing_shape() -> None:
+    layer = BinaryLinear(1024, 1024)
+    inputs = torch.randn(16384, 1024)
+
+    assert layer._known_triton_losing_shape(inputs) is True
+    assert layer._should_use_packed_inference(inputs) is False
+
+
+def test_binary_linear_keeps_triton_enabled_for_smaller_batches() -> None:
+    layer = BinaryLinear(1024, 1024)
+    inputs = torch.randn(2048, 1024, device="cpu")
+
+    assert layer._known_triton_losing_shape(inputs) is False

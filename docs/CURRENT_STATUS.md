@@ -58,6 +58,12 @@ The repository currently has four working layers of functionality.
 - Model-level inference benchmark now also supports configurable float32
   matmul precision, which matters on Tensor Core GPUs for fair dense versus
   binary systems comparisons.
+- The dense-vs-binary comparison entry point now also supports explicit float32
+  matmul precision, so comparison runs can use the same GPU benchmarking hygiene
+  as the standalone model benchmark.
+- The dense-vs-binary comparison entry point now also supports configurable
+  feature count, so wide trained-model comparisons can be run from the same
+  workflow that produces quality and runtime deltas.
 - The dense-vs-binary comparison script now includes a model-level inference
   benchmark section by default and now emits a comparison artifact bundle.
 - Generated artifacts and Lightning checkpoints are now routed under `/mnt`, not
@@ -150,9 +156,18 @@ Important nuance from the refreshed benchmarks:
 - targeted profiling at shape `(16384, 1024, 1024)` shows that regression is
   kernel-local: the packed Triton binary layer itself is slower than the
   reference path there, not just the full model around it
+- after expanding the Triton autotune space, the binary Triton path improved at
+  the mid-range wide batches, but the kernel-local regression at
+  `(16384, 1024, 1024)` still remains
+- a conservative runtime fallback now disables Triton for the known losing
+  large-batch shape regime, so the model path no longer pays the worst known
+  penalty at batch `16384`
 - wide dense results are highly sensitive to `torch.set_float32_matmul_precision`
   on `NVIDIA L4`; under `medium`, the dense `(1024, 1024)` model becomes much
   faster than the earlier default-precision measurements suggested
+- wide binary no-Triton results are also highly sensitive to matmul precision;
+  `high` and `medium` roughly halve latency versus `highest` at the larger
+  tested batches
 
 ## 4. What Has Been Validated
 
@@ -198,6 +213,11 @@ The next session should assume:
 - future wide dense-versus-binary comparisons should set float32 matmul
   precision explicitly, preferably `high` or `medium`, to avoid undercounting
   dense and binary no-Triton GEMM throughput on Tensor Core GPUs
+- the current Triton autotune surface is better than before for mid-range wide
+  batches, but still not sufficient to recover the highest tested batch
+- the comparison workflow can now be used directly for wide experiments, and the
+  Triton-on records at the highest tested batch may reflect fallback to the
+  reference path rather than actual Triton execution
 - the next major design decision is not whether to do custom kernels, but
   whether to stay strict binary or begin a parallel ternary or int2 path
 

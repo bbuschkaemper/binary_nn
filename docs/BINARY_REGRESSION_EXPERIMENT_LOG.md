@@ -485,6 +485,153 @@ That means the repo's current systems story is now more precise:
 - but the current wide end-to-end model path is not yet beating a properly
   configured dense baseline on `NVIDIA L4`
 
+### 3.13 Expanded Triton autotune coverage and normalized the full wide GEMM baseline
+
+After isolating the kernel-local regression, two follow-up changes were made.
+
+First, the packed Triton kernel autotune space was expanded to include larger
+output tiles and to key autotuning on `K` as well as `M` and `N`.
+
+The new candidate grid now includes:
+
+- `BLOCK_M` in `{16, 32, 64, 128}`
+- `BLOCK_N` in `{16, 32, 64}`
+- explicit `num_stages=2`
+- autotune key `("M", "N", "K")`
+
+The goal was to help the regime with very large batch dimension `M` and more
+moderate matrix widths.
+
+The widened benchmark was then rerun at `--matmul-precision medium`.
+
+Post-retune wide-model results on `NVIDIA L4`:
+
+- dense at batch `512`: `0.2031ms`
+- dense at batch `2048`: `0.2914ms`
+- dense at batch `8192`: `1.6395ms`
+- dense at batch `16384`: `3.6349ms`
+
+- binary shortcut, no Triton at batch `512`: `0.4986ms`
+- binary shortcut, Triton at batch `512`: `0.2465ms`
+
+- binary shortcut, no Triton at batch `2048`: `0.4908ms`
+- binary shortcut, Triton at batch `2048`: `0.4354ms`
+
+- binary shortcut, no Triton at batch `8192`: `2.1317ms`
+- binary shortcut, Triton at batch `8192`: `2.9550ms`
+
+- binary shortcut, no Triton at batch `16384`: `4.5615ms`
+- binary shortcut, Triton at batch `16384`: `12.6656ms`
+
+Interpretation:
+
+- the autotune expansion materially improved the Triton path at batch `2048`
+  relative to the earlier `medium` run
+- it also improved the Triton path at batch `8192`, but not enough to beat the
+  no-Triton baseline there
+- it did not fix the catastrophic loss at batch `16384`
+
+The kernel-local regression was then rechecked directly after the autotune
+change at random shape `(16384, 1024, 1024)`:
+
+- reference path: `3.2743ms`
+- Triton path: `5.0160ms`
+- speedup: `0.65x`
+
+So the current conclusion remains:
+
+- the extra autotune coverage improves the medium-large regime
+- the kernel still loses directly at the highest tested batch size
+- fixing the `16384 x 1024 x 1024` operating point likely needs deeper kernel
+  work than just adding a few more tile options
+
+Second, the binary no-Triton path was benchmarked under explicit matmul
+precision settings, just as the dense baseline already was.
+
+Wide binary no-Triton results by precision:
+
+- shortcut batch `2048`: `0.8768ms` at `highest`, `0.4866ms` at `high`,
+  `0.4826ms` at `medium`
+- shortcut batch `8192`: `4.7805ms` at `highest`, `2.1846ms` at `high`,
+  `2.1858ms` at `medium`
+- shortcut batch `16384`: `8.8401ms` at `highest`, `4.5263ms` at `high`,
+  `4.5032ms` at `medium`
+
+- no-shortcut batch `2048`: `1.0507ms` at `highest`, `0.4699ms` at `high`,
+  `0.4706ms` at `medium`
+- no-shortcut batch `8192`: `4.9240ms` at `highest`, `2.0629ms` at `high`,
+  `2.0733ms` at `medium`
+- no-shortcut batch `16384`: `8.5893ms` at `highest`, `4.2681ms` at `high`,
+  `4.2631ms` at `medium`
+
+Interpretation:
+
+- the binary no-Triton path benefits from Tensor Core-friendly precision almost
+  as much as the dense baseline does
+- fair wide-model systems comparisons in this repo must therefore normalize
+  precision for both dense and no-Triton binary paths, not just dense alone
+
+### 3.14 Added wide comparison controls and a conservative Triton fallback policy
+
+The next pragmatic step was to improve the normal comparison workflow and to
+stop paying a known bad inference cost in the widest regressing case.
+
+Two implementation changes were made:
+
+- `src/run_regression_comparison.py` now accepts `--features` and
+  `--informative-features`, so wide regression experiments can be run through
+  the comparison entry point instead of only through the standalone model
+  benchmark
+- `BinaryLinear` now uses a conservative fallback heuristic that disables Triton
+  when the layer sees the currently known losing shape regime:
+  very large batch size with `in_features <= 1024` and `out_features <= 1024`
+
+The fallback is intentionally narrow. It is not a general performance model. It
+only exists to avoid the specific high-batch loss that has already been
+measured repeatedly.
+
+After that change, a wide comparison run was executed with:
+
+- `features=1024`
+- dense hidden dims `(1024, 1024)`
+- binary hidden dims `(1024, 1024)`
+- `--matmul-precision medium`
+- inference batches `512`, `2048`, `8192`, `16384`
+
+Measured comparison-run inference results:
+
+- dense at batch `512`: `0.3145ms`
+- dense at batch `2048`: `0.2896ms`
+- dense at batch `8192`: `1.6347ms`
+- dense at batch `16384`: `3.6114ms`
+
+- binary shortcut, no Triton at batch `512`: `0.4759ms`
+- binary shortcut, Triton-enabled at batch `512`: `0.2366ms`
+
+- binary shortcut, no Triton at batch `2048`: `0.4721ms`
+- binary shortcut, Triton-enabled at batch `2048`: `0.4432ms`
+
+- binary shortcut, no Triton at batch `8192`: `2.1540ms`
+- binary shortcut, Triton-enabled at batch `8192`: `2.9375ms`
+
+- binary shortcut, no Triton at batch `16384`: `4.5720ms`
+- binary shortcut, Triton-enabled at batch `16384`: `4.5199ms`
+
+Interpretation:
+
+- the fallback removes the worst known penalty at batch `16384`
+- the wide comparison workflow is now capable of producing decision-grade wide
+  artifacts directly
+- the current Triton path still helps at smaller batches, is marginal at `2048`,
+  loses at `8192`, and is now effectively bypassed at the highest tested batch
+
+That changes the practical systems recommendation:
+
+- keep Triton available because it still helps in part of the regime
+- but do not force it unconditionally for large-batch wide inference
+- the next kernel iteration should aim to replace this heuristic with a real
+  performance-aware specialization or a better kernel implementation
+
 ## 4. Best Measured Configurations So Far
 
 All numbers below are from the same generated regression task with:
