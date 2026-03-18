@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 
@@ -15,6 +16,7 @@ if str(SRC_DIR) not in sys.path:
 
 from regression_data import RegressionDataConfig, create_regression_dataloaders
 from regression_models import (
+    PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD,
     ShadowFreeTernaryLinear,
     ShadowFreeTernaryRegressor,
     TernaryLinear,
@@ -337,6 +339,53 @@ def test_shadowfree_regressor_can_initialize_from_structured_projection() -> Non
 
     assert torch.equal(structured_layer.weight_state.cpu(), expected_weight_state)
     assert structured_layer.nonzero_density() <= 0.25
+
+
+def test_projected_shadowfree_regressor_does_not_default_to_sparse() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(2,),
+        use_input_shortcut=False,
+        threshold_scale=0.5,
+    )
+    with torch.no_grad():
+        ternary_layer = next(
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        )
+        ternary_layer.weight.copy_(
+            torch.tensor(
+                [
+                    [0.95, 0.8, 0.7, 0.6],
+                    [-0.5, -0.45, -0.4, -0.35],
+                ],
+                dtype=torch.float32,
+            )
+        )
+        assert ternary_layer.bias is not None
+        ternary_layer.bias.zero_()
+        output_head = source.ternary_path[-1]
+        assert isinstance(output_head, torch.nn.Linear)
+        output_head.weight.copy_(torch.tensor([[0.4, -0.2]], dtype=torch.float32))
+        output_head.bias.zero_()
+
+    target = ShadowFreeTernaryRegressor.from_ste_regressor(
+        source,
+        target_density=0.25,
+        update_interval=1,
+    )
+
+    structured_layer = next(
+        module
+        for module in target.modules()
+        if isinstance(module, ShadowFreeTernaryLinear)
+    )
+
+    assert structured_layer.sparse_inference_density_threshold == pytest.approx(
+        PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD
+    )
+    target.eval()
+    with torch.no_grad():
+        assert not structured_layer._should_use_sparse_inference(torch.randn(3, 4))
 
 
 def test_shadowfree_ternary_linear_index_inference_matches_dense_path() -> None:

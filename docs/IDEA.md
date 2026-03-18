@@ -1,379 +1,178 @@
-# Discrete FFN Experiment Note
+# GPU-First Low-Bit Training Idea
 
-Last updated: 2026-03-13
+Last updated: 2026-03-18
 
-This document formulates a general research idea for a new experimental
-repository.
+This document defines the current working research hypothesis for the repository.
 
 ## Document Role
 
-Use this file for the original long-range concept behind the repository. It is
-less useful for current implementation status, but important for understanding
-the intended research direction beyond the current regression prototype.
-
-The goal is to define a clean first-principles experiment around a discrete,
-packed feed-forward network (FFN) training method that is related to, but more
-aggressive than, BitNet-style low-bit training.
+Use this file when you need to understand the main *new* idea we want to test next.
+It is a hypothesis, not a validated result.
 
 ## 1. One-Sentence Summary
 
-Replace standard FFN weights with directly trained discrete signed masks,
-represented as two binary channels that encode positive and negative support,
-and update those discrete states directly from accumulated batch statistics
-instead of maintaining hidden floating-point master weights.
+Train a projected ternary model using a cached discrete weight state that is refreshed
+only every `K` steps, so the model keeps projected-family quality while amortizing
+quantization / projection work and moving closer to a kernel-friendly GPU
+representation.
 
-## 2. Core Idea
+## 2. Why This Is The Right Direction Now
 
-The motivating intuition is:
+The current local evidence points to a very specific gap.
 
-- standard transformers spend a large fraction of their compute inside FFN
-  matrix multiplies
-- FFN weights may tolerate more aggressive discretization than the rest of the
-  network
-- if the discrete state is the actual parameter, training might not need a
-  shadow floating-point weight that is repeatedly quantized back down
-- packed binary storage could enable custom GPU kernels based on word-level
-  bit operations
+- projected / STE ternary is the strongest quality family on the hard benchmark
+- shadow-free ternary is the most interesting optimization idea, but it is not yet
+  stable enough on the hard benchmark to become the main path
+- CPU density chasing already moved to projected `0.001`, so lower density alone is
+  clearly not the main blocker anymore
+- the next useful gain has to come from a training rule or operator design that makes
+  low-bit training cheaper on GPU while preserving projected-like quality
 
-The proposal is easiest to state in terms of weights, not neurons.
+## 3. Core Proposal: Refresh-Scheduled Projected Ternary Training
 
-Instead of learning a real-valued FFN weight matrix `W`, define two binary mask
-matrices:
+Working name:
 
-- `P in {0,1}^{m x n}` for positive support
-- `N in {0,1}^{m x n}` for negative support
+- **refresh-scheduled projected ternary training**
 
-and interpret the effective weight as:
+Abbreviation used locally in planning:
 
-$$
-W = P - N
-$$
+- **RSPT**
 
-with an exclusivity constraint:
+The idea is to combine three things that the repo already learned separately:
 
-$$
-P \odot N = 0
-$$
+1. projected / STE training preserves quality best
+2. shadow-free training suggests that stable discrete state matters
+3. kernels want a representation that does not change format every step
 
-This means each effective weight is ternary:
+## 4. Proposed State Representation
 
-$$
-W_{ij} \in \{-1, 0, +1\}
-$$
+The first version should keep the representation simple.
 
-So the clean formulation is not "true or false weights" in the ordinary sense.
-It is a dual-rail binary encoding of ternary signed weights.
+State:
 
-## 3. Why This Is Adjacent to BitNet
-
-BitNet is the closest existing line of work, but this idea is not identical to
-BitNet.
-
-BitNet and BitNet b1.58:
-
-- replace linear layers with low-bit `BitLinear` layers
-- use ternary weights `{-1, 0, +1}` via absmean quantization
-- use low-bit activations during forward
-- still rely on standard gradient-based optimization of a trainable model
-- in practice keep some tensors such as norms and often embeddings in higher
-  precision
-
-This proposed experiment differs in one important way:
-
-- the discrete state itself is the parameter being optimized
-- updates are applied directly to the discrete state rather than to an unseen
-  floating-point master copy
-
-That makes this closer to a shadow-free discrete optimization scheme than to a
-conventional quantization-aware training recipe.
-
-## 4. Relevant BitNet Sources
-
-Primary sources worth reading before implementing anything:
-
-- BitNet repository: <https://github.com/microsoft/BitNet>
-- BitNet b1.58 model card: <https://huggingface.co/microsoft/bitnet-b1.58-2B-4T>
-- The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits:
-  <https://arxiv.org/abs/2402.17764>
-- BitNet b1.58 2B4T Technical Report:
-  <https://arxiv.org/abs/2504.12285>
-- bitnet.cpp inference paper:
-  <https://arxiv.org/abs/2410.16144>
-
-Useful implementation details from those sources:
-
-- BitNet b1.58 uses ternary weights, not strict binary weights
-- activations are quantized separately from weights
-- the best published results come from native low-bit training, not from a late
-  post-training quantization pass
-- the practical inference wins depend on specialized kernels rather than on
-  generic framework execution alone
-
-## 5. Precise Parameterization
-
-Consider an FFN linear map with input `x` and output `y`:
-
-$$
-y = Wx
-$$
-
-Under the dual-mask parameterization:
-
-$$
-y = (P - N)x = Px - Nx
-$$
-
-This has two immediate consequences:
-
-1. The effective weight set is ternary.
-2. Efficient bitwise execution is easiest only if activations are also low-bit.
-
-If `x` stays in BF16 or FP32, then `Px` and `Nx` still mean summing selected
-input values, so the kernel is not a pure XNOR-popcount binary network.
-
-Therefore there are two regimes:
-
-### 5.1 Discrete weights, real-valued activations
-
-Pros:
-
-- simpler to stabilize
-- closer to standard transformer training
-- easier first experiment
-
-Cons:
-
-- kernel efficiency story is weaker
-- custom GPU packing may not pay off immediately
-
-### 5.2 Discrete weights, low-bit activations
-
-Pros:
-
-- stronger systems story
-- more opportunity for packed `uint32` kernels and bitwise arithmetic
-
-Cons:
-
-- much harder optimization problem
-- higher risk of accuracy collapse early in training
-
-For a first experiment, the safer path is discrete weights with higher-precision
-activations.
-
-## 6. Proposed Training Rule
-
-The most interesting part of the idea is the training rule.
-
-Instead of:
-
-- keeping a real-valued master weight
-- taking an optimizer step in float space
-- quantizing back to a discrete representation for forward
-
-use the discrete state itself as the optimized object.
-
-For a weight `w_ij in {-1, 0, +1}`, accumulate a batch-level credit statistic
-over a large update window. A natural first choice is the usual outer-product
-signal from backpropagation:
-
-$$
-G = \sum_b \delta_b x_b^\top
-$$
-
-where:
-
-- `x_b` is the input activation to the FFN projection
-- `delta_b` is the backward signal at the projection output or preactivation
-
-Then choose the next discrete state directly by minimizing a simple surrogate:
-
-$$
-w_{ij}^{new} = \arg\min_{s \in \{-1,0,+1\}} G_{ij}s + \lambda |s|
-$$
-
-which gives the thresholding rule:
-
-$$
-w_{ij}^{new} =
-\begin{cases}
-+1 & \text{if } G_{ij} < -\lambda \\
-0 & \text{if } |G_{ij}| \le \lambda \\
--1 & \text{if } G_{ij} > \lambda
-\end{cases}
-$$
+- latent weights `W` in BF16 or FP32
+- cached ternary state `Q in {-1, 0, +1}`
+- per-row or per-channel scale `s`
+- optional accumulated evidence buffer `A` for refresh-time decisions
 
 Interpretation:
 
-- strong negative gradient evidence turns a connection on positively
-- strong positive gradient evidence turns a connection on negatively
-- weak evidence prunes the connection to zero
+- `W` is the optimizer-facing state
+- `Q` is the forward-facing discrete state
+- `A` is optional support for more shadow-free-like refresh updates
 
-This is a form of direct discrete optimization or periodic state selection,
-not a standard optimizer in floating-point parameter space.
+## 5. Training Loop
 
-## 7. How To Encode It Efficiently
+The first experimental loop should be:
 
-The systems idea is to pack each binary mask into machine words such as
-`uint32`.
+1. start from the current projected / STE recipe or warm start
+2. build the discrete state `Q` from `W`
+3. keep `Q` fixed for `K` optimizer steps
+4. run forward and backward through the cached `Q`
+5. update `W` every step, but do not rebuild `Q` every step
+6. on refresh boundaries, rebuild or re-project `Q`
+7. optionally use the evidence buffer `A` to bias refresh-time add / drop decisions
 
-For each block of 32 weights:
+This is intentionally conservative. The first version should try to keep projected-like
+quality, not maximize novelty.
 
-- one `uint32` stores the positive-mask bits
-- one `uint32` stores the negative-mask bits
+## 6. Why It Might Improve GPU Training
 
-That means 32 ternary weights can be stored in 64 bits, or 2 bits per weight in
-storage, while still enabling word-level logical operations.
+Potential benefits:
 
-Potential execution strategies:
+- quantization and projection overhead are amortized across multiple steps
+- the forward representation becomes more stable and therefore more kernel-friendly
+- representation churn is reduced
+- the experiment becomes easier to instrument at the operator level
+- it moves training closer to the representation that inference would later use
 
-1. Real-valued activations:
-   expand the set bits and sum corresponding inputs for `P`, then subtract the
-   sum for `N`
-2. Binary or few-bit activations:
-   use packed logical ops and population counts to emulate multiply-accumulate
-   more efficiently
+The goal is not only fewer bits in storage. The real target is lower GPU-side work per
+useful unit of training progress.
 
-The first strategy is the easier research baseline.
-The second is the more ambitious hardware-aligned direction.
+## 7. Why It Might Improve GPU Inference Later
 
-## 8. Why The Idea Is Plausible
+If the training loop already spends most of its time using a stable ternary state, then
+a future GPU inference kernel can target the same representation directly.
 
-The idea makes technical sense for several reasons.
+That matters because the current repo evidence strongly suggests:
 
-- Ternary weight sets `{-1, 0, +1}` already have strong precedent from BitNet.
-- FFNs dominate a large share of transformer arithmetic cost.
-- Zero-valued connections provide built-in sparsity pressure.
-- Large-batch accumulation before discrete updates could reduce the instability
-  of per-sample bit flips.
-- The proposal is modular: it can be tested in FFNs first without changing the
-  rest of the network.
+- speed wins do not appear automatically from lower precision alone
+- representation and kernel design have to be aligned from the start
 
-## 9. What Is Most Likely To Fail
+## 8. The First Knobs To Sweep
 
-Several parts of the idea are plausible in principle but risky in practice.
+Start with a small, interpretable set of ablations.
 
-### 9.1 Optimizing neurons instead of weights is the wrong abstraction
+- refresh interval `K`
+- whether projection happens on every refresh or only some refreshes
+- density schedule across training
+- whether refresh uses only latent `W` or also the evidence buffer `A`
+- whether activations remain BF16 or are lightly quantized in forward
+- whether all layers participate or only the largest hidden layers
 
-The natural optimized object is the connection weight or mask entry, not the
-neuron as a whole.
+## 9. Minimal First Experiment
 
-### 9.2 Pure bitwise speedups are not automatic on GPUs
+Benchmark:
 
-Packing into `uint32` does not guarantee faster execution.
+- the wide nonlinear residual benchmark
 
-Without carefully designed kernels, the costs of:
+Compare:
 
-- unpacking bits
-- irregular access to selected inputs
-- reductions across many bit positions
+- tuned dense BF16 baseline
+- current projected ternary baseline
+- first RSPT variant
 
-can erase the theoretical gain.
+Measure:
 
-### 9.3 Training without any higher-precision statistics is unlikely to work
+- RMSE
+- total runtime
+- repeated mean step time
+- timing variance
+- peak memory
 
-Even if the model weights are discrete, it is still likely necessary to keep:
+A first-pass success condition is modest but meaningful:
 
-- activations in BF16 or FP32 at first
-- backpropagated error signals in higher precision
-- accumulated update statistics in higher precision
+- keep quality in the projected / STE regime while lowering GPU training cost
+- or improve quality further without making runtime worse
 
-The strongest version of the proposal is therefore not "fully bitwise training"
-on day one. It is "discrete model parameters with higher-precision learning
-signals".
+## 10. Main Failure Modes
 
-### 9.4 Direct bit updates may oscillate
+The most likely ways this can fail are:
 
-If a weight is updated too often, it may flip between `-1`, `0`, and `+1`.
-This likely requires:
+- stale `Q` hurts optimization too much
+- `W` still dominates memory and the refresh schedule saves almost nothing
+- refresh events are too expensive and erase the gains
+- activation-side low-bit changes destabilize the comparison
+- benchmark noise hides small but real timing changes
 
-- update windows spanning many minibatches
-- confidence thresholds
-- hysteresis or cooldown rules
-- possibly an EMA over batch statistics before state changes
+## 11. What This Idea Is Not
 
-### 9.5 Applying it everywhere is too ambitious for a first study
+This is **not**:
 
-Attention, embeddings, norms, and output heads have different sensitivity
-profiles. The first experiment should isolate FFNs only.
+- a CPU-sparsity project
+- a claim that direct-discrete shadow-free training already works on the hard task
+- a late post-training quantization pass
+- proof that strict binary is better than ternary
 
-## 10. Strongest First Experiment
+It is a GPU-first training idea built from the strongest current local evidence.
 
-For a new experimental repository, the best first study is narrow.
+## 12. Why This Is Still Adjacent To BitNet
 
-### Phase 1: Dense FFN-only replacement
+The proposal is still close to the BitNet line because:
 
-- use a small transformer or MLP benchmark
-- replace only FFN linear layers with dual-mask ternary weights
-- keep attention, embeddings, norms, and output projections in BF16
-- keep activations in BF16
-- use direct discrete updates only on FFN weights
+- ternary weights remain central
+- low-bit activations are treated as important, not optional forever
+- kernel-aware representation design is part of the training story
 
-Success criterion:
+The local novelty is the refresh-scheduled discrete state, which is motivated by the
+combination of:
 
-- the model trains stably at all
-- the ternary FFN variant reaches a competitive fraction of the BF16 baseline
+- projected-family quality
+- shadow-free discrete-update intuition
+- the need for a GPU-friendly representation that stays stable for long enough to matter
 
-### Phase 2: Add packed kernels
+## 13. Bottom Line
 
-- implement a packed storage format for `P` and `N`
-- benchmark memory usage and throughput independently from model quality
-- compare naive tensor implementation versus custom packed kernel
-
-Success criterion:
-
-- measurable reduction in memory bandwidth or kernel time for FFN layers
-
-### Phase 3: Add low-bit activations
-
-- quantize FFN activations only
-- test whether the systems benefit justifies the optimization cost
-
-Success criterion:
-
-- performance degradation remains bounded while runtime improves materially
-
-## 11. Naming The Method
-
-Avoid calling it simply a "1-bit FFN" because that is imprecise.
-
-More accurate names:
-
-- dual-rail binary FFN
-- shadow-free ternary FFN
-- direct discrete FFN training
-- packed signed-mask FFN
-- bit-flip FFN optimization
-
-Of these, "shadow-free ternary FFN" is the clearest research label.
-
-## 12. Recommended Minimal Research Question
-
-The cleanest first research question is:
-
-> Can transformer FFN weights be trained directly in a ternary signed-mask
-> parameterization, without floating-point master weights, while preserving a
-> useful fraction of baseline model quality and creating a path to packed
-> low-bandwidth kernels?
-
-That question is precise, testable, and close enough to BitNet to inherit
-useful intuition, while still being materially different from existing
-quantization-aware training work.
-
-## 13. Bottom-Line Assessment
-
-The idea makes sense.
-
-The strongest version of it is not:
-
-- "all training becomes pure bitwise logic"
-
-The strongest version is:
-
-- FFN weights are directly represented as ternary signed masks
-- discrete state changes are learned from accumulated batch evidence
-- higher-precision activations and learning statistics are retained initially
-- packed kernels are pursued as a second-stage systems optimization
-
-That is a coherent experimental direction for a new general neural network
-research repository.
+The best next bet is not lower density or more CPU sparsity. It is a training idea that
+keeps projected-family quality while making the discrete state stable enough to optimize
+and stable enough for future GPU kernels to exploit.

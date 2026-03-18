@@ -2,92 +2,113 @@
 
 Last updated: 2026-03-18
 
-This directory is the repository memory for binary and ternary neural network
-research. The goal is to make future sessions fast to resume:
+This folder is the repository memory for one main research objective:
 
-- know what the repo currently does
-- know what has already been tried and measured
-- know which design decisions are still open
-- know where to look for binary-baseline results versus ternary follow-up work
+- find a new low-bit training idea that improves the GPU quality/speed frontier
+- make that idea useful for both training and inference, not just as a CPU-only trick
 
-## 1. Recommended Reading Order
+## Document Role
 
-If the goal is to resume active engineering work, read in this order:
+Use this file as the entry point to the docs set.
+
+## 1. New North Star
+
+The repo is no longer mainly asking:
+
+- can low-bit CPU inference be faster than dense BF16?
+
+The stronger question now is:
+
+- can we discover a binary or ternary training method that matches or beats tuned
+  dense BF16 quality
+- lowers GPU training cost in a way that survives repeated measurement
+- and produces a representation that can later support faster GPU inference too
+
+That means the docs should now bias toward:
+
+- training-rule ideas
+- GPU measurement quality
+- representation and kernel co-design
+- benchmark honesty about both quality and runtime
+
+## 2. Recommended Reading Order
+
+If the goal is to resume active research work, read in this order:
 
 1. `CURRENT_STATUS.md`
-2. `TERNARY_RESEARCH_EXPERIMENT_LOG.md`
-3. `ARCHITECTURE.md`
-4. `ROADMAP.md`
-5. `BINARY_REGRESSION_EXPERIMENT_LOG.md`
-6. `1BIT_NN_STATE_OF_THE_ART.md`
-7. `1BIT_NN_PAPER_INVENTORY.md`
-8. `IDEA.md`
+2. `ROADMAP.md`
+3. `IDEA.md`
+4. `ARCHITECTURE.md`
+5. `TERNARY_RESEARCH_EXPERIMENT_LOG.md`
+6. `BINARY_REGRESSION_EXPERIMENT_LOG.md`
+7. `1BIT_NN_STATE_OF_THE_ART.md`
+8. `1BIT_NN_PAPER_INVENTORY.md`
 
-## 2. Document Roles
+## 3. Document Roles
 
-### 2.1 Active working memory
+### 3.1 Active working memory
 
 - `CURRENT_STATUS.md`
-  - short operational handoff
+  - shortest operational handoff
   - what is implemented now
-  - what has already been validated
+  - what is currently believed
   - what the next session should assume
 
 - `ROADMAP.md`
   - near-term plan
   - open design decisions
-  - recommended next experiments
+  - recommended next experiments under the new GPU-first goal
+
+- `IDEA.md`
+  - current working research hypothesis
+  - the main new low-bit training idea worth testing next
 
 - `ARCHITECTURE.md`
   - code structure map for `src/`
   - main execution flows
-  - where to change what in future sessions
+  - where to change what when implementing the next idea
+
+- `TERNARY_RESEARCH_EXPERIMENT_LOG.md`
+  - detailed chronology of the ternary workstream
+  - the projected, STE, shadow-free, and hybrid findings
+  - which artifacts remain decision-grade
 
 - `BINARY_REGRESSION_EXPERIMENT_LOG.md`
   - detailed chronology of the binary baseline work
-  - measurements, ablations, and conclusions from the binary regression branch
+  - what the binary branch still contributes to the new GPU-first direction
 
-- `TERNARY_RESEARCH_EXPERIMENT_LOG.md`
-  - detailed chronology of the new ternary branch
-  - shadow-free, STE, hybrid, and projected handoff findings
-  - concrete artifact paths and conclusions from the 2026-03-18 ternary work
-
-### 2.2 Research background memory
+### 3.2 Research background memory
 
 - `1BIT_NN_STATE_OF_THE_ART.md`
-  - longer-form research summary
-  - where the public frontier currently is
-  - why BitNet-style ternary systems matter
+  - outside-literature framing
+  - what the field currently says about native low-bit training and kernels
+  - what is still missing for GPU training wins
 
 - `1BIT_NN_PAPER_INVENTORY.md`
   - compact reading list
-  - quickest way to recover the relevant papers and their purpose
+  - fastest way to recover which papers matter for the new goal
 
-- `IDEA.md`
-  - original repository concept note
-  - long-horizon research direction around discrete FFN training and packing
-
-## 3. Practical Use Rules
+## 4. Practical Update Rules
 
 When updating docs in future sessions:
 
-- put current implementation state in `CURRENT_STATUS.md`
+- put current implementation state and best current numbers in `CURRENT_STATUS.md`
 - put next-step priorities and unresolved decisions in `ROADMAP.md`
-- put code-structure and workflow knowledge in `ARCHITECTURE.md`
-- put binary-specific experiment history in `BINARY_REGRESSION_EXPERIMENT_LOG.md`
-- put ternary-specific experiment history in `TERNARY_RESEARCH_EXPERIMENT_LOG.md`
-- update the longer research notes only when the external literature or the
-  high-level research framing changes
+- put the current best working research hypothesis in `IDEA.md`
+- put code-structure and flow knowledge in `ARCHITECTURE.md`
+- keep the experiment logs chronological, but always interpret them through the
+  current GPU-first goal rather than the old CPU-first framing
+- update the longer research notes only when the external framing or the
+  repository's top-level objective changes
 
-## 4. What This Docs Folder Is Optimized For
+## 5. What This Folder Is Optimized For
 
 This docs folder is optimized for:
 
 - fast session-to-session continuity
-- preserving experimental findings that would otherwise be trapped in terminal
-  output
-- keeping research framing separate from implementation status
-- making future design decisions easier to justify
+- preserving measured evidence that would otherwise be trapped in terminal output
+- keeping the new GPU-first objective visible even when local results are noisy
+- making future design decisions easier to justify from both local evidence and
+  external literature
 
-It is not optimized for polished public documentation. The emphasis is internal
-memory and research continuity.
+It is still internal working memory, not polished public documentation.

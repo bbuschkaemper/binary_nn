@@ -20,6 +20,10 @@ from ternary_kernels import (
     pack_ternary_weight,
 )
 
+# All observed projected frontier points still favor cached dense CPU inference over
+# the sparse CSR path, so projected models should not select sparse by default.
+PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD = 0.0
+
 
 def build_mlp(
     input_dim: int,
@@ -1133,6 +1137,11 @@ class ShadowFreeTernaryRegressor(nn.Module):
                     else None
                 ),
             )
+            if target_density is not None:
+                target_layer.sparse_inference_density_threshold = min(
+                    target_layer.sparse_inference_density_threshold,
+                    PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD,
+                )
 
         source_output_head = cast(nn.Linear, source.ternary_path[-1])
         target_output_head = cast(nn.Linear, self.ternary_path[-1])

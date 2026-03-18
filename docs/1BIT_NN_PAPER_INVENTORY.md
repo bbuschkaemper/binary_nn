@@ -1,96 +1,73 @@
 # 1-Bit Neural Networks Paper Inventory
 
-Last updated: 2026-03-16
+Last updated: 2026-03-18
 
-This is a compact reading list for the current 1-bit neural network landscape.
-It separates papers into the ones that look foundational for this repository and
-the ones that broaden the picture around training, quantization, inference, and
-hardware.
+This is a compact reading list for the current 1-bit and ternary landscape, organized
+around the repository's new goal: finding a low-bit training idea that improves GPU
+training and eventually GPU inference.
 
 ## Document Role
 
-Use this file as the fastest way to recover the relevant papers and why they
-matter. It is the quickest literature-entry document in the folder.
+Use this file as the fastest way to recover which papers matter and why.
 
-## 1. Core 1-Bit LLM Papers
+## 1. GPU-First Anchor Papers
 
-| Year | Paper | Link | Why it matters |
-| --- | --- | --- | --- |
-| 2023 | BitNet: Scaling 1-bit Transformers for Large Language Models | <https://arxiv.org/abs/2310.11453> | Original BitNet paper. Introduces `BitLinear` and the core scaling claim. |
-| 2024 | The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits | <https://arxiv.org/abs/2402.17764> | Establishes the practical ternary `1.58-bit` regime as the main public frontier. |
-| 2024 | BitNet a4.8: 4-bit Activations for 1-bit LLMs | <https://arxiv.org/abs/2411.04965> | Extends the BitNet line into lower-bit activations and sparse activation handling. |
-| 2024 | 1-bit AI Infra: Part 1.1, Fast and Lossless BitNet b1.58 Inference on CPUs | <https://arxiv.org/abs/2410.16144> | Shows that BitNet-style models can get real CPU speedups with specialized kernels. |
-| 2025 | Bitnet.cpp: Efficient Edge Inference for Ternary LLMs | <https://arxiv.org/abs/2502.11880> | Formalizes the `bitnet.cpp` inference stack for edge deployment. |
-| 2025 | BitNet b1.58 2B4T Technical Report | <https://arxiv.org/abs/2504.12285> | Current flagship open native 1-bit LLM result. |
+| Paper | Link | Why it matters for the current goal |
+| --- | --- | --- |
+| BitNet: Scaling 1-bit Transformers for Large Language Models | <https://arxiv.org/abs/2310.11453> | Foundational `BitLinear` paper. Best starting point for the quality-anchor side of the repo. |
+| The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits | <https://arxiv.org/abs/2402.17764> | Establishes the practical ternary `1.58-bit` regime. Most directly aligned with the repo's projected ternary path. |
+| BitNet b1.58 2B4T Technical Report | <https://arxiv.org/abs/2504.12285> | Strongest public open flagship result for native low-bit quality at scale. |
+| BitNet a4.8: 4-bit Activations for 1-bit LLMs | <https://arxiv.org/abs/2411.04965> | Important because it makes activation precision part of the speed story, not just weight precision. |
 
-## 2. Strong Comparator Papers
+## 2. Inference And Systems Co-Design Papers
 
-These are not BitNet papers, but they are important because they either compete
-with BitNet's claims or reveal failure modes in low-bit assumptions.
+| Paper | Link | Why it matters for the current goal |
+| --- | --- | --- |
+| 1-bit AI Infra: Part 1.1, Fast and Lossless BitNet b1.58 Inference on CPUs | <https://arxiv.org/abs/2410.16144> | Strong reminder that bits alone do not create speed; kernels and representation co-design do. |
+| Bitnet.cpp: Efficient Edge Inference for Ternary LLMs | <https://arxiv.org/abs/2502.11880> | Useful as a concrete example of how a deployment stack is built around a stable low-bit representation. |
 
-| Year | Paper | Link | Why it matters |
-| --- | --- | --- | --- |
-| 2024 | BiLLM: Pushing the Limit of Post-Training Quantization for LLMs | <https://arxiv.org/abs/2402.04291> | Strong post-training 1-bit-style quantization baseline for existing LLMs. |
-| 2024 | Low-Bit Quantization Favors Undertrained LLMs: Scaling Laws for Quantized LLMs with 100T Training Tokens | <https://arxiv.org/abs/2411.17691> | Warns that quantization can degrade more as models become more fully trained. |
+## 3. Training-Idea Papers
 
-## 3. Training-Centric BNN Papers
+| Paper | Link | Why it matters for the current goal |
+| --- | --- | --- |
+| BEP: A Binary Error Propagation Algorithm for Binary Neural Networks Training | <https://arxiv.org/abs/2512.04189> | Useful because it revisits the backward path directly instead of treating training as standard float optimization plus quantization. |
+| Layerwise Progressive Freezing Enables STE-Free Training of Deep Binary Neural Networks | <https://arxiv.org/abs/2601.22660> | Relevant because staged or scheduled discrete updates are a plausible direction for a GPU-first training idea. |
+| Quadratic Unconstrained Binary Optimisation for Training and Regularisation of Binary Neural Networks | <https://arxiv.org/abs/2601.00449> | Helps frame low-bit training as explicit discrete optimization rather than only as surrogate-gradient engineering. |
 
-These are especially relevant for this repo because they attack the optimization
-problem directly instead of treating binary models as a pure inference format.
+## 4. Comparator And Caution Papers
 
-| Year | Paper | Link | Why it matters |
-| --- | --- | --- | --- |
-| 2025/2026 | BEP: A Binary Error Propagation Algorithm for Binary Neural Networks Training | <https://arxiv.org/abs/2512.04189> | Binary-valued backward propagation with bitwise forward and backward passes. |
-| 2026 | Layerwise Progressive Freezing Enables STE-Free Training of Deep Binary Neural Networks | <https://arxiv.org/abs/2601.22660> | Replaces STE with progressive stochastic binarization. |
-| 2026 | Quadratic Unconstrained Binary Optimisation for Training and Regularisation of Binary Neural Networks | <https://arxiv.org/abs/2601.00449> | Treats BNN training explicitly as discrete optimization via QUBO. |
+| Paper | Link | Why it matters for the current goal |
+| --- | --- | --- |
+| BiLLM: Pushing the Limit of Post-Training Quantization for LLMs | <https://arxiv.org/abs/2402.04291> | Strong comparator showing how far a non-native low-bit path can go. Good for avoiding overclaiming. |
+| Low-Bit Quantization Favors Undertrained LLMs: Scaling Laws for Quantized LLMs with 100T Training Tokens | <https://arxiv.org/abs/2411.17691> | Important caution that low-bit stories can look worse as the dense baseline gets more fully trained. |
 
-## 4. Hardware and Verification Papers
+## 5. Recommended Reading Order For This Repository
 
-These broaden the landscape beyond training quality. They matter because the
-real value of binary representations depends on the full stack.
+If the goal is to pick the next research move, read in this order:
 
-| Year | Paper | Link | Why it matters |
-| --- | --- | --- | --- |
-| 2026 | Scalable Digital Compute-in-Memory Ising Machines for Robustness Verification of Binary Neural Networks | <https://arxiv.org/abs/2603.05677> | Hardware-accelerated robustness verification for BNNs. |
-| 2026 | Robustness Verification of Binary Neural Networks: An Ising and Quantum-Inspired Framework | <https://arxiv.org/abs/2602.13536> | Another sign that trustworthy BNN behavior is becoming an active topic. |
-| 2026 | PiC-BNN: A 128-kbit 65 nm Processing-in-CAM-Based End-to-End Binary Neural Network Accelerator | <https://arxiv.org/abs/2601.19920> | End-to-end accelerator for fully binary inference, relevant to hardware co-design. |
-
-## 5. Practical Reading Order
-
-If the goal is to decide where this repository should invest effort, the most
-useful reading order is:
-
-1. `BitNet: Scaling 1-bit Transformers for Large Language Models`
-2. `The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits`
+1. `The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits`
+2. `BitNet: Scaling 1-bit Transformers for Large Language Models`
 3. `BitNet b1.58 2B4T Technical Report`
-4. `1-bit AI Infra: Part 1.1, Fast and Lossless BitNet b1.58 Inference on CPUs`
-5. `Bitnet.cpp: Efficient Edge Inference for Ternary LLMs`
-6. `BiLLM: Pushing the Limit of Post-Training Quantization for LLMs`
-7. `Low-Bit Quantization Favors Undertrained LLMs`
+4. `BitNet a4.8`
+5. `1-bit AI Infra`
+6. `Bitnet.cpp`
+7. `Layerwise Progressive Freezing...`
 8. `BEP`
-9. `Layerwise Progressive Freezing Enables STE-Free Training of Deep Binary Neural Networks`
-10. `Quadratic Unconstrained Binary Optimisation for Training and Regularisation of Binary Neural Networks`
+9. `QUBO for BNN training`
+10. `BiLLM` and `Low-Bit Quantization Favors Undertrained LLMs`
 
-## 6. Key Takeaways From the Inventory
+## 6. What These Papers Suggest For The Repo
 
-- The public frontier for 1-bit LLMs is currently the BitNet family, not a wide
-  field of equally strong alternatives.
-- The best practical results are ternary, not strictly binary.
-- The most open research gap is training, especially training without heavy
-  reliance on floating-point latent states and STE-style approximations.
-- Hardware-aware representation design is now central, not optional.
-- Broader BNN research is useful here because it is beginning to revisit the
-  core optimization problem directly.
+The paper set points to four practical questions.
 
-## 7. Repository-Relevant Questions Raised by the Literature
+- How can we keep BitNet-like ternary quality while reducing GPU training cost?
+- Can a staged or refresh-scheduled discrete update rule work better than rebuilding
+  the low-bit state every step?
+- When do low-bit activations become necessary for a real systems win?
+- What measurements would actually count as a believable GPU speed claim?
 
-- Can a discrete FFN method outperform shadow-weight quantization-aware training
-  on stability or sample efficiency?
-- Can the representation be packed in a way that looks attractive to custom GPU
-  or CPU kernels from the beginning?
-- Can the update rule operate on the discrete state itself rather than on a
-  hidden continuous copy?
-- Is ternary the right first target for this repo, even if the longer-term goal
-  is stricter binary training?
+## 7. Bottom Line
 
-The current literature suggests the answer to the last question is probably yes.
+The literature suggests that the next useful local contribution is not “another low-bit
+baseline.” It is a training procedure that connects low-bit quality, training cost, and
+kernel-friendly inference representation in one coherent story.
