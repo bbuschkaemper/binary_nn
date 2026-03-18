@@ -173,10 +173,63 @@ class TernaryLinear(nn.Module):
     def _scale(self) -> torch.Tensor:
         return self.weight.abs().mean(dim=1, keepdim=True).detach().clamp_min(1e-6)
 
+    def _prune_quantized_weight_to_density(
+        self, quantized_weight: torch.Tensor, target_density: float
+    ) -> torch.Tensor:
+        if not 0.0 < target_density <= 1.0:
+            raise ValueError("target_density must be in the range (0, 1].")
+
+        nonzero_mask = quantized_weight != 0
+        active_count = int(nonzero_mask.sum().item())
+        if active_count == 0:
+            return quantized_weight
+
+        target_active_count = min(
+            active_count,
+            max(1, int(round(target_density * quantized_weight.numel()))),
+        )
+        if target_active_count >= active_count:
+            return quantized_weight
+
+        active_scores = self.weight.detach().abs()[nonzero_mask]
+        keep_positions = torch.topk(
+            active_scores,
+            k=target_active_count,
+            largest=True,
+            sorted=False,
+        ).indices
+        flat_quantized = quantized_weight.clone().view(-1)
+        nonzero_indices = torch.nonzero(
+            nonzero_mask.view(-1), as_tuple=False
+        ).squeeze(1)
+        prune_mask = torch.ones(
+            active_count,
+            dtype=torch.bool,
+            device=quantized_weight.device,
+        )
+        prune_mask[keep_positions] = False
+        flat_quantized[nonzero_indices[prune_mask]] = 0
+        return flat_quantized.view_as(quantized_weight)
+
     def quantized_weight(self) -> torch.Tensor:
         scale = self._scale()
         threshold = scale * self.threshold_scale
         return cast(torch.Tensor, TernaryQuantizeSTE.apply(self.weight, threshold))
+
+    def export_shadowfree_state(
+        self,
+        *,
+        target_density: float | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        quantized_weight = self.quantized_weight().detach().to(torch.int8)
+        if target_density is not None:
+            quantized_weight = self._prune_quantized_weight_to_density(
+                quantized_weight,
+                target_density,
+            )
+        scale = self._scale().detach().squeeze(1).to(torch.float32)
+        bias = self.bias.detach().clone() if self.bias is not None else None
+        return quantized_weight, scale, bias
 
     def nonzero_density(self) -> float:
         with torch.no_grad():
@@ -302,6 +355,36 @@ class ShadowFreeTernaryLinear(nn.Module):
     @property
     def scale(self) -> torch.Tensor:
         return F.softplus(self.log_scale).clamp_min(1e-4)
+
+    @torch.no_grad()
+    def initialize_from_quantized_state_(
+        self,
+        weight_state: torch.Tensor,
+        scale: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> None:
+        if weight_state.shape != self.weight_state.shape:
+            raise ValueError(
+                f"Weight-state shape mismatch: expected {tuple(self.weight_state.shape)}, got {tuple(weight_state.shape)}."
+            )
+        resolved_scale = scale.reshape(-1).to(self.log_scale.dtype)
+        if resolved_scale.shape[0] != self.out_features:
+            raise ValueError(
+                f"Scale shape mismatch: expected {self.out_features}, got {resolved_scale.shape[0]}."
+            )
+
+        self.weight_state.copy_(weight_state.to(torch.int8))
+        clamped_scale = resolved_scale.clamp_min(1e-4)
+        self.log_scale.copy_(torch.log(torch.expm1(clamped_scale)))
+        if self.bias is not None:
+            if bias is None:
+                self.bias.zero_()
+            else:
+                self.bias.copy_(bias.to(self.bias.dtype))
+        self._accumulated_evidence.zero_()
+        self._batches_since_update = 0
+        self._state_version += 1
+        self._invalidate_sparse_cache()
 
     def reset_parameters(self) -> None:
         scale_init = 1.0 / math.sqrt(max(1, self.in_features))
@@ -665,6 +748,89 @@ class ShadowFreeTernaryRegressor(nn.Module):
         for module in self.modules():
             if isinstance(module, ShadowFreeTernaryLinear):
                 module.apply_discrete_updates_()
+
+    @classmethod
+    def from_ste_regressor(
+        cls,
+        source: TernaryRegressor,
+        *,
+        target_density: float | None = None,
+        initial_density: float = 0.15,
+        update_interval: int = 4,
+        activation_std_multiplier: float = 0.5,
+        prune_ratio: float = 0.5,
+        flip_multiplier: float = 1.5,
+    ) -> "ShadowFreeTernaryRegressor":
+        source_layers = [
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        ]
+        if not source_layers:
+            raise ValueError("Source TernaryRegressor contains no TernaryLinear layers.")
+
+        input_dim = source_layers[0].in_features
+        hidden_dims = tuple(layer.out_features for layer in source_layers)
+        target = cls(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            use_input_shortcut=source.shortcut is not None,
+            initial_density=initial_density,
+            update_interval=update_interval,
+            activation_std_multiplier=activation_std_multiplier,
+            prune_ratio=prune_ratio,
+            flip_multiplier=flip_multiplier,
+        )
+        source_device = next(source.parameters()).device
+        target.to(source_device)
+        target.initialize_from_ste_regressor_(
+            source,
+            target_density=target_density,
+        )
+        return target
+
+    @torch.no_grad()
+    def initialize_from_ste_regressor_(
+        self,
+        source: TernaryRegressor,
+        *,
+        target_density: float | None = None,
+    ) -> None:
+        source_layers = [
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        ]
+        target_layers = [
+            module
+            for module in self.modules()
+            if isinstance(module, ShadowFreeTernaryLinear)
+        ]
+        if len(source_layers) != len(target_layers):
+            raise ValueError(
+                f"Ternary-layer count mismatch: source has {len(source_layers)}, target has {len(target_layers)}."
+            )
+
+        for source_layer, target_layer in zip(source_layers, target_layers, strict=True):
+            weight_state, scale, bias = source_layer.export_shadowfree_state(
+                target_density=target_density,
+            )
+            target_layer.initialize_from_quantized_state_(
+                weight_state=weight_state.to(target_layer.weight_state.device),
+                scale=scale.to(target_layer.log_scale.device),
+                bias=(
+                    bias.to(target_layer.bias.device)
+                    if bias is not None and target_layer.bias is not None
+                    else None
+                ),
+            )
+
+        source_output_head = cast(nn.Linear, source.ternary_path[-1])
+        target_output_head = cast(nn.Linear, self.ternary_path[-1])
+        target_output_head.load_state_dict(source_output_head.state_dict())
+
+        if source.shortcut is None:
+            self.shortcut = None
+        elif self.shortcut is None:
+            raise ValueError("Source has a shortcut but target does not.")
+        else:
+            self.shortcut.load_state_dict(source.shortcut.state_dict())
 
     def extra_parameter_count(self) -> int:
         return sum(

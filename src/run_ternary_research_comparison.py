@@ -16,6 +16,7 @@ from regression_experiment import RegressionRunResult, TrainingConfig
 from regression_models import ShadowFreeTernaryLinear, TernaryLinear
 from run_regression_baseline import train_regression_baseline
 from run_regression_comparison import regression_run_result_to_dict
+from run_hybrid_ternary_regression import train_hybrid_ternary_regression
 from run_shadowfree_ternary_regression import train_shadowfree_ternary_regression
 from run_ternary_regression import train_ternary_regression
 
@@ -175,7 +176,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model-family",
-        choices=("shadowfree", "ste"),
+        choices=("shadowfree", "ste", "hybrid", "projected"),
         default="shadowfree",
         help="Which ternary research model to compare against the dense baseline.",
     )
@@ -229,6 +230,21 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prune-ratio", type=float, default=0.5)
     parser.add_argument("--flip-multiplier", type=float, default=1.5)
     parser.add_argument("--threshold-scale", type=float, default=0.5)
+    parser.add_argument("--warm-start-epochs", type=int, default=50)
+    parser.add_argument("--consolidation-epochs", type=int, default=25)
+    parser.add_argument("--consolidation-learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--projection-target-density",
+        type=float,
+        default=0.35,
+        help="Target density for projected STE-to-shadow-free handoff.",
+    )
+    parser.add_argument(
+        "--projected-update-interval",
+        type=int,
+        default=100000,
+        help="Discrete-update interval for the projected family. Use a large value to freeze ternary state during recovery training.",
+    )
     parser.add_argument(
         "--json-out",
         type=Path,
@@ -281,7 +297,7 @@ def main() -> None:
         precision=dense_precision,
     )
     ternary_hidden_dims_spec = args.ternary_hidden_dims
-    if args.model_family == "ste" and ternary_hidden_dims_spec == "64":
+    if args.model_family in {"ste", "hybrid", "projected"} and ternary_hidden_dims_spec == "64":
         ternary_hidden_dims_spec = "64,32"
 
     ternary_training_config = TrainingConfig(
@@ -297,6 +313,8 @@ def main() -> None:
         data_config=data_config,
         training_config=dense_training_config,
     )
+    family_details_key: str | None = None
+    family_details: dict[str, object] | None = None
     if args.model_family == "shadowfree":
         ternary_result = train_shadowfree_ternary_regression(
             data_config=data_config,
@@ -309,7 +327,7 @@ def main() -> None:
             flip_multiplier=args.flip_multiplier,
         )
         ternary_model_name = "shadowfree_ternary"
-    else:
+    elif args.model_family == "ste":
         ternary_result = train_ternary_regression(
             data_config=data_config,
             training_config=ternary_training_config,
@@ -317,6 +335,95 @@ def main() -> None:
             threshold_scale=args.threshold_scale,
         )
         ternary_model_name = "ste_ternary"
+    elif args.model_family == "hybrid":
+        warm_start_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.warm_start_epochs,
+            learning_rate=args.ternary_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        consolidation_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.consolidation_epochs,
+            learning_rate=args.consolidation_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        hybrid_run = train_hybrid_ternary_regression(
+            data_config=data_config,
+            warm_start_training_config=warm_start_training_config,
+            consolidation_training_config=consolidation_training_config,
+            use_input_shortcut=True,
+            threshold_scale=args.threshold_scale,
+            initial_density=args.initial_density,
+            update_interval=args.update_interval,
+            activation_std_multiplier=args.activation_std_multiplier,
+            prune_ratio=args.prune_ratio,
+            flip_multiplier=args.flip_multiplier,
+        )
+        ternary_result = hybrid_run.final_result
+        ternary_model_name = "hybrid_ternary"
+        ternary_training_config = consolidation_training_config
+        family_details_key = "hybrid_details"
+        family_details = {
+            "warm_start_training_config": asdict(warm_start_training_config),
+            "consolidation_training_config": asdict(consolidation_training_config),
+            "warm_start_result": regression_run_result_to_dict(
+                hybrid_run.warm_start_result
+            ),
+            "consolidation_result": regression_run_result_to_dict(
+                hybrid_run.consolidation_result
+            ),
+        }
+    else:
+        warm_start_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.warm_start_epochs,
+            learning_rate=args.ternary_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        consolidation_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.consolidation_epochs,
+            learning_rate=args.consolidation_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        projected_run = train_hybrid_ternary_regression(
+            data_config=data_config,
+            warm_start_training_config=warm_start_training_config,
+            consolidation_training_config=consolidation_training_config,
+            use_input_shortcut=True,
+            threshold_scale=args.threshold_scale,
+            projection_target_density=args.projection_target_density,
+            initial_density=args.initial_density,
+            update_interval=args.projected_update_interval,
+            activation_std_multiplier=args.activation_std_multiplier,
+            prune_ratio=args.prune_ratio,
+            flip_multiplier=args.flip_multiplier,
+        )
+        ternary_result = projected_run.final_result
+        ternary_model_name = "projected_ternary"
+        ternary_training_config = consolidation_training_config
+        family_details_key = "projection_details"
+        family_details = {
+            "projection_target_density": args.projection_target_density,
+            "projected_update_interval": args.projected_update_interval,
+            "warm_start_training_config": asdict(warm_start_training_config),
+            "consolidation_training_config": asdict(consolidation_training_config),
+            "warm_start_result": regression_run_result_to_dict(
+                projected_run.warm_start_result
+            ),
+            "consolidation_result": regression_run_result_to_dict(
+                projected_run.consolidation_result
+            ),
+        }
 
     cpu_records = benchmark_model_on_cpu(
         dense_result,
@@ -352,6 +459,8 @@ def main() -> None:
         ],
         "best_sparse_speedup_vs_dense_by_batch": best_sparse_speedup,
     }
+    if family_details_key is not None and family_details is not None:
+        result[family_details_key] = family_details
 
     json_out = resolve_output_path(
         args.json_out,

@@ -233,8 +233,17 @@ def build_lightning_model(
     model_builder: RegressionModelBuilder,
 ) -> RegressionLightningModule:
     assert data_module.bundle is not None
-    target_mean, target_scale = target_scaler_stats(data_module)
     model = model_builder(data_module.bundle.input_dim, training_config.hidden_dims)
+    return build_lightning_model_from_model(data_module, training_config, model)
+
+
+def build_lightning_model_from_model(
+    data_module: RegressionDataModule,
+    training_config: TrainingConfig,
+    model: nn.Module,
+) -> RegressionLightningModule:
+    assert data_module.bundle is not None
+    target_mean, target_scale = target_scaler_stats(data_module)
     return RegressionLightningModule(
         model=model,
         learning_rate=training_config.learning_rate,
@@ -325,20 +334,34 @@ def _count_model_parameters(model: nn.Module) -> int:
 
 
 def train_regression_model(
-    model_builder: RegressionModelBuilder,
+    model_builder: RegressionModelBuilder | None = None,
+    *,
+    model: nn.Module | None = None,
     data_config: RegressionDataConfig | None = None,
     training_config: TrainingConfig | None = None,
 ) -> RegressionRunResult:
     data_config = data_config or RegressionDataConfig()
     training_config = training_config or TrainingConfig()
+    if model_builder is None and model is None:
+        raise ValueError("Either model_builder or model must be provided.")
+    if model_builder is not None and model is not None:
+        raise ValueError("Provide either model_builder or model, not both.")
     L.seed_everything(training_config.seed, workers=True)
 
     data_module = RegressionDataModule(data_config)
     data_module.setup("fit")
     assert data_module.bundle is not None
     data = data_module.bundle
-    model = build_lightning_model(data_module, training_config, model_builder)
-    parameter_count = _count_model_parameters(model)
+    if model is None:
+        assert model_builder is not None
+        lightning_model = build_lightning_model(
+            data_module, training_config, model_builder
+        )
+    else:
+        lightning_model = build_lightning_model_from_model(
+            data_module, training_config, model
+        )
+    parameter_count = _count_model_parameters(lightning_model)
 
     with tempfile.TemporaryDirectory(dir=str(checkpoint_root())) as checkpoint_dir:
         checkpoint_callback = ModelCheckpoint(
@@ -357,11 +380,11 @@ def train_regression_model(
 
         _synchronize_if_cuda_available()
         fit_start = time.perf_counter()
-        trainer.fit(model, datamodule=data_module)
+        trainer.fit(lightning_model, datamodule=data_module)
         _synchronize_if_cuda_available()
         fit_seconds = time.perf_counter() - fit_start
 
-        best_model = load_best_model_weights(model, checkpoint_callback)
+        best_model = load_best_model_weights(lightning_model, checkpoint_callback)
 
         _synchronize_if_cuda_available()
         test_start = time.perf_counter()

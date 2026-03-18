@@ -90,6 +90,10 @@ concept.
 - `src/run_ternary_regression.py`
   - trains the STE ternary branch
 
+- `src/run_hybrid_ternary_regression.py`
+  - trains the STE-to-shadow-free handoff path
+  - supports an optional target-density projection before recovery training
+
 - `src/run_regression_comparison.py`
   - trains dense and binary back to back
   - prints task-quality deltas
@@ -101,7 +105,7 @@ concept.
   - trains a dense baseline plus one ternary branch
   - benchmarks CPU inference with sparse on/off variants
   - writes a comparison JSON plus CPU benchmark CSV under `/mnt`
-  - supports both `shadowfree` and `ste` ternary families
+  - supports `shadowfree`, `ste`, `hybrid`, and `projected` ternary families
 
 - `src/run_binary_regression_sweep.py`
   - sweeps binary architecture and optimization settings
@@ -219,6 +223,9 @@ These are treated as separate ideas, not as one interchangeable model:
   - better harder-task quality baseline
   - currently too dense for CPU sparse wins
 
+`run_hybrid_ternary_regression.py` composes the two families into handoff
+experiments, including a target-density projection variant.
+
 ### 4.3 Training versus inference
 
 Training and inference are still deliberately separated.
@@ -308,6 +315,7 @@ These assumptions are embedded in the current design.
   fully standalone ternary MLP win.
 - The nonlinear residual benchmark is the main ternary sanity check for future
   work.
+- The projected handoff is currently the best sparse-friendly nonlinear bridge.
 - Explicit precision settings matter for fair GPU comparisons.
 
 ## 7. Most Likely Next Architectural Extension
@@ -316,7 +324,7 @@ If work continues along the currently recommended direction, the next major
 structural addition is likely to be one of:
 
 - a structured block-sparse ternary layer
-- an STE-to-shadow-free handoff path
+- a lower-density STE-to-shadow-free handoff path
 - a packed ternary CPU kernel
 
 Those are more likely next steps than another large refactor of the existing

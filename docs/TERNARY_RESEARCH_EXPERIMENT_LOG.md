@@ -73,7 +73,7 @@ Implemented in:
 It compares:
 
 - dense BF16 baseline
-- one selected ternary branch (`shadowfree` or `ste`)
+- one selected ternary branch (`shadowfree`, `ste`, `hybrid`, or `projected`)
 - CPU inference with sparse off and sparse on
 
 It writes:
@@ -220,9 +220,96 @@ Interpretation:
 - the quality gap is small
 - the systems story is still missing because density stayed high
 
+### 4.5 Negative result: naive hybrid consolidation on the nonlinear benchmark
+
+Command surface:
+
+- `src/run_ternary_research_comparison.py --model-family hybrid --target-kind nonlinear_residual ...`
+
+Decision artifact:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-hybrid-nonlinear-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-hybrid-nonlinear-followup-cpu.csv`
+
+Measured result:
+
+Dense BF16 baseline:
+
+- hidden dims `(64, 32)`
+- RMSE `15.6111`
+- total runtime `7.0792s`
+
+Hybrid handoff with free-running direct-discrete consolidation:
+
+- STE warm-start epochs `50`
+- shadow-free consolidation epochs `25`
+- consolidation learning rate `1e-3`
+- update interval `4`
+- RMSE `25.8914`
+- total runtime `12.0098s`
+- nonzero density `0.1105`
+
+CPU inference result:
+
+- sparse CPU is slower than dense at batch `32`
+- sparse CPU becomes faster than dense at batch `128` and `512`
+- best measured sparse speedups:
+  - batch `128`: `1.17x`
+  - batch `512`: `1.36x`
+
+Interpretation:
+
+- the direct-discrete consolidation rule can force sparsity on the harder task
+- in its current form it destroys too much quality to be the default handoff
+  recipe
+
+### 4.6 Density-projected handoff follow-up on the nonlinear benchmark
+
+Command surface:
+
+- `src/run_ternary_research_comparison.py --model-family projected --target-kind nonlinear_residual ...`
+
+Decision artifact:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup-cpu.csv`
+
+Measured result:
+
+Dense BF16 baseline:
+
+- hidden dims `(64, 32)`
+- RMSE `15.6111`
+- total runtime `6.5965s`
+
+Projected handoff:
+
+- STE warm-start epochs `50`
+- target density `0.35`
+- recovery epochs `25`
+- recovery learning rate `3e-4`
+- projected-update interval `100000` to keep ternary state fixed during recovery
+- RMSE `18.4060`
+- total runtime `8.2129s`
+- nonzero density `0.3500`
+
+CPU inference result:
+
+- sparse CPU is still slower than dense at every measured batch
+- the projected model is the best current quality result observed at a
+  sparse-friendly density, but the current sparse kernel does not yet capitalize
+  on it
+
+Interpretation:
+
+- density-aware projection is a better harder-task bridge than free-running
+  shadow-free consolidation
+- the remaining bottleneck is either lower density without another accuracy cliff
+  or a better sparse/packed ternary CPU kernel
+
 ## 5. Main Conclusions
 
-The ternary workstream now supports three clear conclusions.
+The ternary workstream now supports four clear conclusions.
 
 ### 5.1 Sparse CPU wins are possible
 
@@ -241,6 +328,15 @@ research problem, not a finished method.
 The STE ternary branch is the better quality anchor on the nonlinear benchmark,
 but it is too dense to deliver CPU sparse wins yet.
 
+### 5.4 Density-aware projection is the best current sparse bridge
+
+The new projected handoff is the best quality observed so far at a
+sparse-friendly density on the nonlinear benchmark.
+
+It is not yet a full proof-of-concept win because the current sparse CPU path is
+still slower than dense there, but it is a better transition mechanism than the
+naive free-running hybrid update rule.
+
 ## 6. Best Current Research Framing
 
 The most defensible current framing is:
@@ -248,19 +344,19 @@ The most defensible current framing is:
 - shadow-free ternary is a promising sparse residual path with real CPU wins on
   easy linear-style workloads
 - STE ternary is the current quality anchor on harder tasks
-- the next meaningful experiment is probably not "more of the same" on either
-  branch alone
-- the next meaningful experiment is a hybrid or staged method that uses STE to
-  reach a good ternary solution and then consolidates into a sparse shadow-free
-  state
+- naive free-running hybrid consolidation is too destructive on the harder task
+- density-projected handoff is the better current staged method for moving from
+  a quality-friendly ternary solution toward a sparse shadow-free state
 
 ## 7. Recommended Next Experiments
 
-1. Add an STE-to-shadow-free warm-start handoff experiment.
-2. Add target-density or structured-sparsity controls to the ternary branches.
-3. Rebenchmark CPU latency only after density has fallen materially on the
-   nonlinear benchmark.
-4. Explore a block-sparse or bit-packed ternary CPU kernel once the model-side
-   sparsity story is stable.
+1. Sweep projected handoff densities and recovery schedules around the new
+   `0.35` operating point.
+2. Add lower-density or structured-sparsity controls that do not rely on
+   destructive free-running consolidation.
+3. Explore a block-sparse or bit-packed ternary CPU kernel once the projected
+   handoff curve is stable.
+4. Rebenchmark CPU latency after either density falls further or the kernel path
+   improves.
 5. Avoid strong claims about GPU training acceleration until step-time evidence
    exists.

@@ -16,6 +16,7 @@ The latest completed workstream delivered:
 
 - a direct-discrete `ShadowFreeTernaryLinear` prototype
 - an STE `TernaryLinear` baseline beside it
+- an STE-to-shadow-free handoff path with optional target-density projection
 - sparse CPU inference caches for both ternary families
 - BF16 support in the shared training path
 - a nonlinear residual benchmark mode for harder sanity checks
@@ -46,11 +47,15 @@ overall direction.
 - reject new ternary claims if they only work on the easy linear benchmark and
   collapse to a near-zero-density residual branch
 - focus on closing the quality gap while lowering density on the nonlinear task
+- treat the new `projected` handoff family as the current best bridge between
+  quality and sparsity on that task
 
 ### 2.2 Turn sparse CPU wins into a more hardware-aligned path
 
 - the current shadow-free CPU win uses cached sparse execution, not a packed
   ternary kernel
+- the new `projected` handoff reaches density `0.35` on the harder nonlinear
+  task, but sparse CPU inference is still slower than dense there
 - the next systems step is to move from unstructured sparse tensor execution to
   block-sparse or bit-packed ternary kernels
 - keep measuring dense versus sparse variants separately so the source of any win
@@ -127,10 +132,13 @@ Cons:
 
 - more engineering than committing to one branch immediately
 - requires careful experiment design to avoid mixing two effects
+- naive free-running consolidation is already known to be too destructive on the
+  harder nonlinear task
 
 ## 4. Recommended Direction
 
-Current recommendation: **Option C, the hybrid bootstrap path**.
+Current recommendation: **Option C, but specifically the projected handoff
+variant rather than free-running consolidation**.
 
 Reasoning:
 
@@ -138,22 +146,27 @@ Reasoning:
   plausible
 - the STE branch already shows that ternary quality on the harder nonlinear
   benchmark can get close to dense
-- the missing link is a staged method that starts from a quality-friendly ternary
-  solution and then consolidates into a sparse shadow-free state
+- naive direct-discrete consolidation reached useful sparsity but collapsed to
+  RMSE `25.8914` on the nonlinear task
+- density-projected handoff reached RMSE `18.4060` at density `0.35`, which is
+  the best current quality at a sparse-ready density
+- the remaining blocker is now either lower density without another quality cliff
+  or a better sparse/packed ternary inference kernel
 
 ## 5. Suggested First Milestone
 
 If work resumes now, the first milestone should be:
 
-1. add a warm-start experiment that trains the STE ternary model first
-2. project that solution into a shadow-free ternary state
-3. continue training with direct-discrete updates
-4. compare:
+1. keep the new `projected` handoff as the harder-task sparse baseline
+2. sweep projection densities and recovery schedules around the current `0.35`
+   operating point
+3. compare:
    - dense BF16 baseline
    - STE ternary
-   - pure shadow-free ternary
-   - STE-to-shadow-free hybrid
-5. only then decide whether to spend time on a packed ternary kernel
+   - free-running hybrid consolidation
+   - density-projected handoff
+4. only then decide whether the next effort should go into lower-density model
+   schedules or a packed ternary CPU kernel
 
 ## 6. Recommended Execution Order
 
@@ -162,10 +175,11 @@ If work resumes now, the recommended order is:
 1. keep the binary path intact as the stable published baseline
 2. improve the nonlinear residual benchmark until it is the accepted ternary
    quality gate
-3. prototype the STE-to-shadow-free handoff
-4. add target-density or structured-sparsity controls so CPU speed can improve
-   without relying on accidental collapse
-5. benchmark CPU latency again
+3. treat the density-projected STE-to-shadow-free handoff as the current handoff
+   baseline
+4. add lower-density or structured-sparsity controls so CPU speed can improve
+   without another accuracy cliff
+5. benchmark CPU latency again with the model-side density held fixed
 6. only then spend effort on custom CUDA update kernels or a packed ternary CPU
    kernel
 
@@ -183,4 +197,6 @@ to:
 - keeping the binary baseline untouched
 - treating the shadow-free linear result as a real but narrow proof of concept
 - treating the nonlinear residual benchmark as the primary ternary quality gate
+- treating the density-projected handoff as the current best sparse-friendly
+  nonlinear baseline
 - avoiding strong claims about GPU training speed until step-time evidence exists

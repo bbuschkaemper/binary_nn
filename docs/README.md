@@ -49,7 +49,7 @@ If the goal is to resume active engineering work, read in this order:
 
 - `TERNARY_RESEARCH_EXPERIMENT_LOG.md`
   - detailed chronology of the new ternary branch
-  - shadow-free versus STE findings
+  - shadow-free, STE, hybrid, and projected handoff findings
   - concrete artifact paths and conclusions from the 2026-03-18 ternary work
 
 ### 2.2 Research background memory

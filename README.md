@@ -65,6 +65,32 @@ It now also writes a comparison bundle under `/mnt/binary_nn/artifacts/`, plus
 inference benchmark JSON, CSV, summary JSON, and frontier CSV when the
 inference benchmark section is enabled.
 
+## Ternary Research Comparison
+
+Run the ternary research comparison entry point from the repository root:
+
+```bash
+python src/run_ternary_research_comparison.py --model-family ste
+```
+
+This script trains a dense BF16-capable reference plus one ternary branch and
+then benchmarks CPU inference with sparse execution disabled and enabled. The
+available ternary families are:
+
+- `shadowfree` for the direct-discrete sparse residual path
+- `ste` for the quality-oriented latent-weight ternary baseline
+- `hybrid` for free-running STE-to-shadow-free consolidation
+- `projected` for target-density STE-to-shadow-free projection plus recovery
+
+For the harder stress test used in the current ternary research work, run:
+
+```bash
+python src/run_ternary_research_comparison.py --model-family projected --target-kind nonlinear_residual
+```
+
+The script writes a comparison JSON plus CPU benchmark CSV under
+`/mnt/binary_nn/artifacts/`.
+
 ## Binary Sweep
 
 Run a curated binary sweep and print the current Pareto frontier:
@@ -206,8 +232,10 @@ path rather than actual Triton kernel execution.
 
 ## Experiment Notes
 
-Ongoing experiment ideas, steps taken, and measured findings are tracked in
-`docs/BINARY_REGRESSION_EXPERIMENT_LOG.md`.
+Ongoing experiment ideas, steps taken, and measured findings are tracked in:
+
+- `docs/BINARY_REGRESSION_EXPERIMENT_LOG.md`
+- `docs/TERNARY_RESEARCH_EXPERIMENT_LOG.md`
 
 For session-to-session handoff and planning, also see:
 

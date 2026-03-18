@@ -46,8 +46,12 @@ The repository now has five working layers of functionality.
 - `src/run_ternary_regression.py` trains the STE ternary branch.
 - `src/run_shadowfree_ternary_regression.py` trains the direct-discrete
   shadow-free branch.
+- `src/run_hybrid_ternary_regression.py` runs an STE-to-shadow-free handoff and
+  can optionally prune the transferred ternary state to a target density before
+  recovery training.
 - `src/run_ternary_research_comparison.py` compares a dense baseline against one
-  ternary branch and writes JSON plus CSV artifacts under `/mnt`.
+  ternary branch (`shadowfree`, `ste`, `hybrid`, or `projected`) and writes JSON
+  plus CSV artifacts under `/mnt`.
 
 ### 1.4 Shared training and data improvements
 
@@ -85,6 +89,7 @@ The files below are the main entry points to understand or continue the work.
 - `src/run_regression_comparison.py`
 - `src/run_shadowfree_ternary_regression.py`
 - `src/run_ternary_regression.py`
+- `src/run_hybrid_ternary_regression.py`
 - `src/run_ternary_research_comparison.py`
 
 ### 2.3 Data and experiment configuration
@@ -160,7 +165,7 @@ Important nuance:
 - the dense shortcut remains important; the result should be read as a sparse
   residual decomposition, not as a no-shortcut ternary MLP victory
 
-### 3.4 Nonlinear follow-up result
+### 3.4 Nonlinear STE follow-up result
 
 On the harder `target_kind="nonlinear_residual"` benchmark:
 
@@ -189,7 +194,51 @@ Artifacts:
 - `/mnt/binary_nn/artifacts/2026-03-18-ste-nonlinear-followup.json`
 - `/mnt/binary_nn/artifacts/2026-03-18-ste-nonlinear-followup-cpu.csv`
 
-### 3.5 Binary Triton result still matters
+### 3.5 Hybrid and projected handoff follow-ups
+
+Two STE-to-shadow-free handoff variants were tested on the same nonlinear task.
+
+Naive hybrid consolidation with free-running direct-discrete updates:
+
+- artifact: `/mnt/binary_nn/artifacts/2026-03-18-hybrid-nonlinear-followup.json`
+- RMSE `25.8914`
+- ternary nonzero density `0.1105`
+- sparse CPU speedup versus dense:
+  - batch `128`: about `1.17x`
+  - batch `512`: about `1.36x`
+
+Interpretation:
+
+- this path can force sparsity, but the current direct-discrete consolidation
+  rule destroys too much quality on the harder task
+- it is not the right default handoff recipe
+
+Density-projected handoff with light recovery training:
+
+- artifact: `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup.json`
+- target density `0.35`
+- warm-start epochs `50`
+- recovery epochs `25`
+- recovery learning rate `3e-4`
+- RMSE `18.4060`
+- ternary nonzero density `0.3500`
+
+Interpretation:
+
+- this is the best quality observed so far at a sparse-friendly density on the
+  nonlinear task
+- the current sparse CPU kernel still loses to dense at this density, so the
+  next bottleneck is either lower density without another accuracy cliff or a
+  better sparse/packed ternary kernel
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-hybrid-nonlinear-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-hybrid-nonlinear-followup-cpu.csv`
+- `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup-cpu.csv`
+
+### 3.6 Binary Triton result still matters
 
 The packed Triton binary inference path is still faster than the unpacked
 reference path on larger matrix shapes, but the known large-batch regression at
@@ -205,6 +254,7 @@ ground unless a future change breaks it.
 - the full test suite passes
 - new ternary sparse-inference equivalence tests pass
 - new nonlinear-data smoke tests pass
+- new STE-to-shadow-free conversion and target-density projection tests pass
 
 ### 4.2 BF16 shared path
 
@@ -232,6 +282,10 @@ The next session should assume:
 - the nonlinear residual benchmark is the better sanity check for whether the
   ternary branch is actually carrying nonlinear load
 - the STE ternary branch is currently the better harder-task quality reference
+- naive free-running STE-to-shadow-free consolidation is too destructive on the
+  nonlinear task to be the default bridge
+- density-projected STE-to-shadow-free handoff is the better current sparse
+  bridge, but it still needs either lower density or a faster sparse kernel
 - the next major ternary question is not whether sparse CPU inference can work at
   all; it is how to keep the ternary branch both useful and sparse on harder
   tasks
