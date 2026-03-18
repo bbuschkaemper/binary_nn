@@ -74,6 +74,8 @@ def train_hybrid_ternary_regression(
     use_input_shortcut: bool = True,
     threshold_scale: float = 0.5,
     projection_target_density: float | None = None,
+    projection_structure: str | None = None,
+    projection_block_size: int | None = None,
     initial_density: float = 0.25,
     update_interval: int = 4,
     activation_std_multiplier: float = 1.0,
@@ -108,6 +110,8 @@ def train_hybrid_ternary_regression(
     hybrid_model = ShadowFreeTernaryRegressor.from_ste_regressor(
         warm_start_result.model.model,
         target_density=projection_target_density,
+        projection_structure=projection_structure,
+        projection_block_size=projection_block_size,
         initial_density=initial_density,
         update_interval=update_interval,
         activation_std_multiplier=activation_std_multiplier,
@@ -182,6 +186,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optionally prune the STE ternary state to this density before the consolidation phase.",
     )
+    parser.add_argument(
+        "--projection-structure",
+        choices=("none", "row_block"),
+        default="none",
+        help="Optional structured projection rule to apply before the consolidation phase.",
+    )
+    parser.add_argument(
+        "--projection-block-size",
+        type=int,
+        default=16,
+        help="Contiguous block size for structured projection rules such as row_block.",
+    )
     parser.add_argument("--initial-density", type=float, default=0.25)
     parser.add_argument("--update-interval", type=int, default=4)
     parser.add_argument("--activation-std-multiplier", type=float, default=1.0)
@@ -241,6 +257,12 @@ def main() -> None:
         consolidation_training_config=consolidation_training_config,
         threshold_scale=args.threshold_scale,
         projection_target_density=args.projection_target_density,
+        projection_structure=(
+            None if args.projection_structure == "none" else args.projection_structure
+        ),
+        projection_block_size=(
+            None if args.projection_structure == "none" else args.projection_block_size
+        ),
         initial_density=args.initial_density,
         update_interval=args.update_interval,
         activation_std_multiplier=args.activation_std_multiplier,

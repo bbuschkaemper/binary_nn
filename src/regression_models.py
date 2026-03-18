@@ -14,6 +14,11 @@ from binary_kernels import (
     pack_binary_weight,
     packed_binary_linear_triton,
 )
+from ternary_kernels import (
+    IndexedTernaryWeight,
+    indexed_ternary_linear_cpu,
+    pack_ternary_weight,
+)
 
 
 def build_mlp(
@@ -143,7 +148,12 @@ class TernaryLinear(nn.Module):
         *,
         threshold_scale: float = 0.75,
         use_cpu_sparse_inference: bool = True,
-        sparse_inference_density_threshold: float = 0.4,
+        sparse_inference_density_threshold: float = 0.15,
+        use_cpu_index_inference: bool = False,
+        index_inference_min_density: float = 0.15,
+        index_inference_density_threshold: float = 0.5,
+        index_inference_min_batch_size: int = 128,
+        index_inference_output_block_size: int = 64,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -151,6 +161,11 @@ class TernaryLinear(nn.Module):
         self.threshold_scale = threshold_scale
         self.use_cpu_sparse_inference = use_cpu_sparse_inference
         self.sparse_inference_density_threshold = sparse_inference_density_threshold
+        self.use_cpu_index_inference = use_cpu_index_inference
+        self.index_inference_min_density = index_inference_min_density
+        self.index_inference_density_threshold = index_inference_density_threshold
+        self.index_inference_min_batch_size = index_inference_min_batch_size
+        self.index_inference_output_block_size = index_inference_output_block_size
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -159,6 +174,12 @@ class TernaryLinear(nn.Module):
         self._cached_sparse_weight: torch.Tensor | None = None
         self._cached_weight_version = -1
         self._cached_weight_device: torch.device | None = None
+        self._cached_dense_weight: torch.Tensor | None = None
+        self._cached_dense_weight_version = -1
+        self._cached_dense_weight_device: torch.device | None = None
+        self._cached_indexed_weight: IndexedTernaryWeight | None = None
+        self._cached_indexed_weight_version = -1
+        self._cached_indexed_weight_device: torch.device | None = None
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -211,6 +232,82 @@ class TernaryLinear(nn.Module):
         flat_quantized[nonzero_indices[prune_mask]] = 0
         return flat_quantized.view_as(quantized_weight)
 
+    def _prune_quantized_weight_to_row_block_density(
+        self,
+        quantized_weight: torch.Tensor,
+        target_density: float,
+        block_size: int,
+    ) -> torch.Tensor:
+        if block_size <= 0:
+            raise ValueError("projection_block_size must be positive.")
+        if block_size == 1:
+            return self._prune_quantized_weight_to_density(
+                quantized_weight,
+                target_density,
+            )
+        if not 0.0 < target_density <= 1.0:
+            raise ValueError("target_density must be in the range (0, 1].")
+
+        nonzero_mask = quantized_weight != 0
+        active_count = int(nonzero_mask.sum().item())
+        if active_count == 0:
+            return quantized_weight
+
+        target_active_count = min(
+            active_count,
+            max(1, int(round(target_density * quantized_weight.numel()))),
+        )
+        if target_active_count >= active_count:
+            return quantized_weight
+
+        weight_abs = self.weight.detach().abs()
+        block_candidates: list[tuple[float, int, int, int, int]] = []
+        for row_idx in range(quantized_weight.shape[0]):
+            row_nonzero_mask = nonzero_mask[row_idx]
+            if not row_nonzero_mask.any():
+                continue
+            for start in range(0, quantized_weight.shape[1], block_size):
+                end = min(start + block_size, quantized_weight.shape[1])
+                block_nonzero_mask = row_nonzero_mask[start:end]
+                block_active_count = int(block_nonzero_mask.sum().item())
+                if block_active_count == 0:
+                    continue
+                block_score = float(
+                    weight_abs[row_idx, start:end][block_nonzero_mask].sum().item()
+                )
+                block_candidates.append(
+                    (block_score, block_active_count, row_idx, start, end)
+                )
+
+        if not block_candidates:
+            return torch.zeros_like(quantized_weight)
+
+        block_candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+        structured_quantized_weight = torch.zeros_like(quantized_weight)
+        selected_active_count = 0
+        kept_any = False
+        for _, block_active_count, row_idx, start, end in block_candidates:
+            if selected_active_count >= target_active_count:
+                break
+            if (
+                kept_any
+                and selected_active_count + block_active_count > target_active_count
+            ):
+                continue
+            structured_quantized_weight[row_idx, start:end] = quantized_weight[
+                row_idx, start:end
+            ]
+            selected_active_count += block_active_count
+            kept_any = True
+
+        if not kept_any:
+            _, _, row_idx, start, end = block_candidates[0]
+            structured_quantized_weight[row_idx, start:end] = quantized_weight[
+                row_idx, start:end
+            ]
+
+        return structured_quantized_weight
+
     def quantized_weight(self) -> torch.Tensor:
         scale = self._scale()
         threshold = scale * self.threshold_scale
@@ -220,13 +317,30 @@ class TernaryLinear(nn.Module):
         self,
         *,
         target_density: float | None = None,
+        projection_structure: str | None = None,
+        projection_block_size: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         quantized_weight = self.quantized_weight().detach().to(torch.int8)
         if target_density is not None:
-            quantized_weight = self._prune_quantized_weight_to_density(
-                quantized_weight,
-                target_density,
-            )
+            if projection_structure is None:
+                quantized_weight = self._prune_quantized_weight_to_density(
+                    quantized_weight,
+                    target_density,
+                )
+            elif projection_structure == "row_block":
+                if projection_block_size is None:
+                    raise ValueError(
+                        "projection_block_size is required for row_block projection."
+                    )
+                quantized_weight = self._prune_quantized_weight_to_row_block_density(
+                    quantized_weight,
+                    target_density,
+                    projection_block_size,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported projection_structure: {projection_structure!r}"
+                )
         scale = self._scale().detach().squeeze(1).to(torch.float32)
         bias = self.bias.detach().clone() if self.bias is not None else None
         return quantized_weight, scale, bias
@@ -235,6 +349,19 @@ class TernaryLinear(nn.Module):
         with torch.no_grad():
             quantized = self.quantized_weight()
             return float((quantized != 0).float().mean().item())
+
+    def _should_use_index_inference(self, inputs: torch.Tensor) -> bool:
+        density = self.nonzero_density()
+        return (
+            self.use_cpu_sparse_inference
+            and self.use_cpu_index_inference
+            and not self.training
+            and not torch.is_grad_enabled()
+            and inputs.device.type == "cpu"
+            and inputs.ndim == 2
+            and inputs.shape[0] >= self.index_inference_min_batch_size
+            and self.index_inference_min_density <= density <= self.index_inference_density_threshold
+        )
 
     def _should_use_sparse_inference(self, inputs: torch.Tensor) -> bool:
         return (
@@ -246,22 +373,85 @@ class TernaryLinear(nn.Module):
             and self.nonzero_density() <= self.sparse_inference_density_threshold
         )
 
-    def _refresh_sparse_weight_cache(self) -> None:
+    def _refresh_indexed_weight_cache(self) -> None:
+        quantized = self.quantized_weight().detach().to(torch.int8)
+        self._cached_indexed_weight = pack_ternary_weight(
+            quantized,
+            self._scale().detach().squeeze(1),
+        )
+        self._cached_indexed_weight_version = self.weight._version
+        self._cached_indexed_weight_device = self.weight.device
+
+    def _get_indexed_weight(self) -> IndexedTernaryWeight:
+        if (
+            self._cached_indexed_weight is None
+            or self._cached_indexed_weight_version != self.weight._version
+            or self._cached_indexed_weight_device != self.weight.device
+        ):
+            self._refresh_indexed_weight_cache()
+        assert self._cached_indexed_weight is not None
+        return self._cached_indexed_weight
+
+    def _should_use_cached_dense_inference(self, inputs: torch.Tensor) -> bool:
+        return (
+            not self.training
+            and not torch.is_grad_enabled()
+            and inputs.device.type == "cpu"
+            and inputs.ndim == 2
+        )
+
+    def _refresh_dense_weight_cache(self) -> None:
         quantized = self.quantized_weight().detach().to(torch.float32)
-        effective_weight = quantized * self._scale()
+        self._cached_dense_weight = (quantized * self._scale()).contiguous()
+        self._cached_dense_weight_version = self.weight._version
+        self._cached_dense_weight_device = self.weight.device
+
+    def _get_dense_weight(self) -> torch.Tensor:
+        if (
+            self._cached_dense_weight is None
+            or self._cached_dense_weight_version != self.weight._version
+            or self._cached_dense_weight_device != self.weight.device
+        ):
+            self._refresh_dense_weight_cache()
+        assert self._cached_dense_weight is not None
+        return self._cached_dense_weight
+
+    def _refresh_sparse_weight_cache(self) -> None:
+        effective_weight = self._get_dense_weight()
         row_indices, col_indices = torch.nonzero(effective_weight, as_tuple=True)
         if row_indices.numel() == 0:
-            indices = torch.zeros((2, 0), device=effective_weight.device, dtype=torch.int64)
-            values = torch.zeros((0,), device=effective_weight.device, dtype=torch.float32)
+            crow_indices = torch.zeros(
+                self.out_features + 1,
+                device=effective_weight.device,
+                dtype=torch.int64,
+            )
+            column_indices = torch.zeros(
+                (0,),
+                device=effective_weight.device,
+                dtype=torch.int64,
+            )
+            values = torch.zeros(
+                (0,),
+                device=effective_weight.device,
+                dtype=torch.float32,
+            )
         else:
-            indices = torch.stack((row_indices, col_indices))
+            row_counts = torch.bincount(row_indices, minlength=self.out_features)
+            crow_indices = torch.zeros(
+                self.out_features + 1,
+                device=effective_weight.device,
+                dtype=torch.int64,
+            )
+            crow_indices[1:] = torch.cumsum(row_counts, dim=0)
+            column_indices = col_indices.to(torch.int64)
             values = effective_weight[row_indices, col_indices]
-        self._cached_sparse_weight = torch.sparse_coo_tensor(
-            indices,
+        self._cached_sparse_weight = torch.sparse_csr_tensor(
+            crow_indices,
+            column_indices,
             values,
             size=effective_weight.shape,
             device=effective_weight.device,
-        ).coalesce()
+        )
         self._cached_weight_version = self.weight._version
         self._cached_weight_device = self.weight.device
 
@@ -276,6 +466,15 @@ class TernaryLinear(nn.Module):
         return self._cached_sparse_weight
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self._should_use_index_inference(inputs):
+            outputs = indexed_ternary_linear_cpu(
+                inputs,
+                self._get_indexed_weight(),
+                self.bias,
+                output_block_size=self.index_inference_output_block_size,
+            )
+            return outputs.to(inputs.dtype)
+
         if self._should_use_sparse_inference(inputs):
             sparse_weight = self._get_sparse_weight()
             outputs = torch.sparse.mm(
@@ -285,6 +484,13 @@ class TernaryLinear(nn.Module):
             if self.bias is not None:
                 outputs = outputs + self.bias.to(outputs.dtype)
             return outputs.to(inputs.dtype)
+
+        if self._should_use_cached_dense_inference(inputs):
+            return F.linear(
+                inputs,
+                self._get_dense_weight().to(device=inputs.device, dtype=inputs.dtype),
+                self.bias,
+            )
 
         quantized_weight = self.quantized_weight()
         return F.linear(inputs, quantized_weight * self._scale(), self.bias)
@@ -309,7 +515,12 @@ class ShadowFreeTernaryLinear(nn.Module):
         prune_ratio: float = 0.5,
         flip_multiplier: float = 1.5,
         use_cpu_sparse_inference: bool = True,
-        sparse_inference_density_threshold: float = 0.35,
+        sparse_inference_density_threshold: float = 0.15,
+        use_cpu_index_inference: bool = False,
+        index_inference_min_density: float = 0.15,
+        index_inference_density_threshold: float = 0.5,
+        index_inference_min_batch_size: int = 128,
+        index_inference_output_block_size: int = 64,
     ) -> None:
         super().__init__()
         if not 0.0 < initial_density <= 1.0:
@@ -330,6 +541,11 @@ class ShadowFreeTernaryLinear(nn.Module):
         self.flip_multiplier = flip_multiplier
         self.use_cpu_sparse_inference = use_cpu_sparse_inference
         self.sparse_inference_density_threshold = sparse_inference_density_threshold
+        self.use_cpu_index_inference = use_cpu_index_inference
+        self.index_inference_min_density = index_inference_min_density
+        self.index_inference_density_threshold = index_inference_density_threshold
+        self.index_inference_min_batch_size = index_inference_min_batch_size
+        self.index_inference_output_block_size = index_inference_output_block_size
         self.log_scale = nn.Parameter(torch.empty(out_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -350,6 +566,14 @@ class ShadowFreeTernaryLinear(nn.Module):
         self._cached_sparse_state_version = -1
         self._cached_sparse_scale_version = -1
         self._cached_sparse_device: torch.device | None = None
+        self._cached_dense_weight: torch.Tensor | None = None
+        self._cached_dense_state_version = -1
+        self._cached_dense_scale_version = -1
+        self._cached_dense_device: torch.device | None = None
+        self._cached_indexed_weight: IndexedTernaryWeight | None = None
+        self._cached_indexed_state_version = -1
+        self._cached_indexed_scale_version = -1
+        self._cached_indexed_device: torch.device | None = None
         self.reset_parameters()
 
     @property
@@ -418,12 +642,33 @@ class ShadowFreeTernaryLinear(nn.Module):
         self._cached_sparse_state_version = -1
         self._cached_sparse_scale_version = -1
         self._cached_sparse_device = None
+        self._cached_dense_weight = None
+        self._cached_dense_state_version = -1
+        self._cached_dense_scale_version = -1
+        self._cached_dense_device = None
+        self._cached_indexed_weight = None
+        self._cached_indexed_state_version = -1
+        self._cached_indexed_scale_version = -1
+        self._cached_indexed_device = None
 
     def nonzero_density(self) -> float:
         return float((self.weight_state != 0).float().mean().item())
 
     def extra_parameter_count(self) -> int:
         return int(self.weight_state.numel())
+
+    def _should_use_index_inference(self, inputs: torch.Tensor) -> bool:
+        density = self.nonzero_density()
+        return (
+            self.use_cpu_sparse_inference
+            and self.use_cpu_index_inference
+            and not self.training
+            and not torch.is_grad_enabled()
+            and inputs.device.type == "cpu"
+            and inputs.ndim == 2
+            and inputs.shape[0] >= self.index_inference_min_batch_size
+            and self.index_inference_min_density <= density <= self.index_inference_density_threshold
+        )
 
     def _should_use_sparse_inference(self, inputs: torch.Tensor) -> bool:
         return (
@@ -435,31 +680,58 @@ class ShadowFreeTernaryLinear(nn.Module):
             and self.nonzero_density() <= self.sparse_inference_density_threshold
         )
 
+    def _should_use_cached_dense_inference(self, inputs: torch.Tensor) -> bool:
+        return (
+            not self.training
+            and not torch.is_grad_enabled()
+            and inputs.device.type == "cpu"
+            and inputs.ndim == 2
+        )
+
+    def _build_dense_weight(self, device: torch.device) -> torch.Tensor:
+        scale = self.scale.detach().to(device=device).unsqueeze(1)
+        state = self.weight_state.to(device=device, dtype=torch.float32)
+        return (state * scale).contiguous()
+
+    def _get_dense_weight(self, device: torch.device) -> torch.Tensor:
+        if (
+            self._cached_dense_weight is None
+            or self._cached_dense_state_version != self._state_version
+            or self._cached_dense_scale_version != self.log_scale._version
+            or self._cached_dense_device != device
+        ):
+            self._cached_dense_weight = self._build_dense_weight(device)
+            self._cached_dense_state_version = self._state_version
+            self._cached_dense_scale_version = self.log_scale._version
+            self._cached_dense_device = device
+        return self._cached_dense_weight
+
     def _build_sparse_weight(self, device: torch.device) -> torch.Tensor:
-        state = self.weight_state.to(device=device)
-        row_indices, col_indices = torch.nonzero(state, as_tuple=True)
+        dense_weight = self._get_dense_weight(device)
+        row_indices, col_indices = torch.nonzero(dense_weight, as_tuple=True)
         if row_indices.numel() == 0:
-            empty_indices = torch.zeros((2, 0), device=device, dtype=torch.int64)
-            empty_values = torch.zeros((0,), device=device, dtype=torch.float32)
-            sparse = torch.sparse_coo_tensor(
-                empty_indices,
-                empty_values,
+            crow_indices = torch.zeros(self.out_features + 1, device=device, dtype=torch.int64)
+            column_indices = torch.zeros((0,), device=device, dtype=torch.int64)
+            values = torch.zeros((0,), device=device, dtype=torch.float32)
+            return torch.sparse_csr_tensor(
+                crow_indices,
+                column_indices,
+                values,
                 size=(self.out_features, self.in_features),
                 device=device,
             )
-            return sparse.coalesce()
 
-        values = (
-            state[row_indices, col_indices].to(torch.float32)
-            * self.scale.detach().to(device=device)[row_indices]
-        )
-        sparse = torch.sparse_coo_tensor(
-            torch.stack((row_indices, col_indices)),
+        values = dense_weight[row_indices, col_indices]
+        row_counts = torch.bincount(row_indices, minlength=self.out_features)
+        crow_indices = torch.zeros(self.out_features + 1, device=device, dtype=torch.int64)
+        crow_indices[1:] = torch.cumsum(row_counts, dim=0)
+        return torch.sparse_csr_tensor(
+            crow_indices,
+            col_indices.to(torch.int64),
             values,
             size=(self.out_features, self.in_features),
             device=device,
-        ).coalesce()
-        return sparse
+        )
 
     def _get_sparse_weight(self, device: torch.device) -> torch.Tensor:
         if (
@@ -473,6 +745,22 @@ class ShadowFreeTernaryLinear(nn.Module):
             self._cached_sparse_scale_version = self.log_scale._version
             self._cached_sparse_device = device
         return self._cached_sparse_weight
+
+    def _get_indexed_weight(self, device: torch.device) -> IndexedTernaryWeight:
+        if (
+            self._cached_indexed_weight is None
+            or self._cached_indexed_state_version != self._state_version
+            or self._cached_indexed_scale_version != self.log_scale._version
+            or self._cached_indexed_device != device
+        ):
+            self._cached_indexed_weight = pack_ternary_weight(
+                self.weight_state.to(torch.int8),
+                self.scale.detach(),
+            )
+            self._cached_indexed_state_version = self._state_version
+            self._cached_indexed_scale_version = self.log_scale._version
+            self._cached_indexed_device = device
+        return self._cached_indexed_weight
 
     def _accumulate_evidence(
         self, inputs: torch.Tensor, grad_output: torch.Tensor
@@ -532,6 +820,15 @@ class ShadowFreeTernaryLinear(nn.Module):
         self._batches_since_update = 0
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self._should_use_index_inference(inputs):
+            outputs = indexed_ternary_linear_cpu(
+                inputs,
+                self._get_indexed_weight(inputs.device),
+                self.bias,
+                output_block_size=self.index_inference_output_block_size,
+            )
+            return outputs.to(inputs.dtype)
+
         if self._should_use_sparse_inference(inputs):
             sparse_weight = self._get_sparse_weight(inputs.device)
             outputs = torch.sparse.mm(
@@ -541,6 +838,14 @@ class ShadowFreeTernaryLinear(nn.Module):
             if self.bias is not None:
                 outputs = outputs + self.bias.to(outputs.dtype)
             return outputs.to(inputs.dtype)
+
+        if self._should_use_cached_dense_inference(inputs):
+            outputs = F.linear(
+                inputs,
+                self._get_dense_weight(inputs.device).to(dtype=inputs.dtype),
+                self.bias,
+            )
+            return outputs
 
         scale = self.scale.to(device=inputs.device, dtype=inputs.dtype).unsqueeze(1)
         effective_weight = self.weight_state.to(
@@ -755,6 +1060,8 @@ class ShadowFreeTernaryRegressor(nn.Module):
         source: TernaryRegressor,
         *,
         target_density: float | None = None,
+        projection_structure: str | None = None,
+        projection_block_size: int | None = None,
         initial_density: float = 0.15,
         update_interval: int = 4,
         activation_std_multiplier: float = 0.5,
@@ -784,6 +1091,8 @@ class ShadowFreeTernaryRegressor(nn.Module):
         target.initialize_from_ste_regressor_(
             source,
             target_density=target_density,
+            projection_structure=projection_structure,
+            projection_block_size=projection_block_size,
         )
         return target
 
@@ -793,6 +1102,8 @@ class ShadowFreeTernaryRegressor(nn.Module):
         source: TernaryRegressor,
         *,
         target_density: float | None = None,
+        projection_structure: str | None = None,
+        projection_block_size: int | None = None,
     ) -> None:
         source_layers = [
             module for module in source.modules() if isinstance(module, TernaryLinear)
@@ -810,6 +1121,8 @@ class ShadowFreeTernaryRegressor(nn.Module):
         for source_layer, target_layer in zip(source_layers, target_layers, strict=True):
             weight_state, scale, bias = source_layer.export_shadowfree_state(
                 target_density=target_density,
+                projection_structure=projection_structure,
+                projection_block_size=projection_block_size,
             )
             target_layer.initialize_from_quantized_state_(
                 weight_state=weight_state.to(target_layer.weight_state.device),

@@ -59,6 +59,8 @@ def _set_sparse_cpu_inference(model: torch.nn.Module, enabled: bool) -> None:
     for module in model.modules():
         if isinstance(module, (ShadowFreeTernaryLinear, TernaryLinear)):
             module.use_cpu_sparse_inference = enabled
+            if enabled:
+                module.sparse_inference_density_threshold = 1.0
 
 
 def _clone_model_for_cpu_benchmark(run_result: RegressionRunResult) -> torch.nn.Module:
@@ -240,6 +242,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help="Target density for projected STE-to-shadow-free handoff.",
     )
     parser.add_argument(
+        "--projection-structure",
+        choices=("none", "row_block"),
+        default="none",
+        help="Optional structured projection rule for the projected family.",
+    )
+    parser.add_argument(
+        "--projection-block-size",
+        type=int,
+        default=16,
+        help="Contiguous block size for structured projected handoff rules.",
+    )
+    parser.add_argument(
         "--projected-update-interval",
         type=int,
         default=100000,
@@ -402,6 +416,16 @@ def main() -> None:
             use_input_shortcut=True,
             threshold_scale=args.threshold_scale,
             projection_target_density=args.projection_target_density,
+            projection_structure=(
+                None
+                if args.projection_structure == "none"
+                else args.projection_structure
+            ),
+            projection_block_size=(
+                None
+                if args.projection_structure == "none"
+                else args.projection_block_size
+            ),
             initial_density=args.initial_density,
             update_interval=args.projected_update_interval,
             activation_std_multiplier=args.activation_std_multiplier,
@@ -414,6 +438,16 @@ def main() -> None:
         family_details_key = "projection_details"
         family_details = {
             "projection_target_density": args.projection_target_density,
+            "projection_structure": (
+                None
+                if args.projection_structure == "none"
+                else args.projection_structure
+            ),
+            "projection_block_size": (
+                None
+                if args.projection_structure == "none"
+                else args.projection_block_size
+            ),
             "projected_update_interval": args.projected_update_interval,
             "warm_start_training_config": asdict(warm_start_training_config),
             "consolidation_training_config": asdict(consolidation_training_config),

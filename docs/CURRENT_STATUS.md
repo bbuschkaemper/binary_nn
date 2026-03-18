@@ -238,7 +238,308 @@ Artifacts:
 - `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup.json`
 - `/mnt/binary_nn/artifacts/2026-03-18-projected-nonlinear-followup-cpu.csv`
 
-### 3.6 Binary Triton result still matters
+### 3.6 Wide nonlinear follow-up with a tuned dense reference
+
+On a wider nonlinear benchmark with:
+
+- `n_features=256`
+- `n_informative=256`
+- `nonlinear_pair_count=64`
+- `nonlinear_scale=1.5`
+- hidden dims `(256, 128)`
+
+the dense BF16 reference was explicitly retuned first.
+
+Best observed standalone dense setting:
+
+- learning rate `3e-4`
+- epochs `75`
+- RMSE `10.0171`
+- total runtime `6.6501s`
+
+Wide STE follow-up artifact:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-ste-followup.json`
+- RMSE `9.7710`
+- ternary density about `0.7461`
+
+Interpretation:
+
+- at this width, ternary quality is no longer the main problem
+- STE beats the tuned dense reference on RMSE
+- inference cost is still much worse than dense, especially on CPU sparse mode
+
+Wide projected follow-up artifact:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-followup.json`
+- RMSE `9.3466`
+- ternary density about `0.3500`
+
+Interpretation:
+
+- this is now the strongest ternary quality result in the repo at a sparse-ready
+  density
+- projected handoff beats both the tuned dense reference and the wide STE point
+  on RMSE
+- sparse CPU inference still loses to dense, but the penalty is much smaller than
+  for wide STE
+- one paired comparison run reported projected total runtime below the dense run,
+  but standalone dense timing was also much faster in the tuning sweep, so GPU
+  speed should still be treated as unresolved rather than claimed
+
+Additional negative follow-ups:
+
+- per-row projection balancing and layer-skewed density schedules did not improve
+  the projected `0.35` nonlinear point
+- teacher-style activation calibration of projected scales and biases did not
+  improve the projected `0.35` point either
+- a naive index-based CPU kernel prototype for `ShadowFreeTernaryLinear` was much
+  slower than both dense execution and the current `torch.sparse.mm` path
+
+### 3.6.1 CPU systems follow-up on the wide projected frontier
+
+A dedicated CPU systems pass was run directly on the wide projected `0.35`
+frontier.
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-indexed-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-csr-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-cached-dense-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-final-followup.json`
+
+What was learned:
+
+- a forced indexed-gather ternary kernel was numerically correct but catastrophically
+  slower on the real projected model, especially at larger batch sizes
+- switching the sparse backend to CSR made the sparse path cleaner and much more
+  realistic to benchmark, but a forced sparse path at density `0.35` still lost to
+  dense execution at every tested batch size
+- the largest practical CPU win came from caching the exact dense ternary weight in
+  eval mode instead of rebuilding it every forward pass
+
+Best current wide projected CPU numbers after the cache change:
+
+- tuned dense BF16 baseline latency: `0.1775 / 0.2450 / 0.4441 / 1.0431 ms` at batch
+  `32 / 128 / 512 / 2048`
+- projected cached-dense latency: `0.2498 / 0.3883 / 0.7959 / 1.1286 ms` with RMSE
+  `9.3466`
+- forced sparse CSR latency: `0.6591 / 0.7706 / 1.5097 / 2.6216 ms`
+
+Interpretation:
+
+- at density `0.35`, cached dense ternary inference is now the correct default CPU
+  path
+- sparse inference should only be enabled at materially lower density, or after a
+  more aggressive packed or structured kernel exists
+- the CPU gap to the tuned dense baseline is now much smaller than before,
+  especially at the largest batch, but it is still not yet a speed win
+
+### 3.6.2 Lower-density projected follow-up and packed-kernel evaluation
+
+A dual follow-up then tested both remaining levers:
+
+- lower projected density on the wide nonlinear benchmark
+- a genuinely packed ternary CPU lookup prototype
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density025-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density020-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-dual-eval-lean.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-dual-eval-lean.csv`
+
+What was learned:
+
+- projected target density `0.20` preserved wide-benchmark quality surprisingly well,
+  reaching RMSE `9.3308` at density `0.20`
+- projected target density `0.25` also held the same wide quality regime (`9.3268`),
+  which supports the conclusion that the projected frontier can move materially
+  below `0.35`
+- this established projected `0.20` as the best observed **replicated** ternary
+  quality-versus-density point in the repo so far
+- cached dense inference remained the fastest projected CPU path in the clean
+  follow-up; forced sparse CSR was still slower even at density `0.20`
+- the packed lookup prototype was strongly negative at both densities and both tested
+  block sizes (`4` and `8`)
+
+Clean lean CPU compare on the wide benchmark:
+
+- dense baseline latency: `0.2638 ms` at batch `128`, `1.5478 ms` at batch `2048`
+- projected `0.35` cached-dense latency: `0.4819 / 1.1263 ms`
+- projected `0.35` forced sparse CSR latency: `0.9765 / 2.3463 ms`
+- projected `0.35` packed lookup (`b4 / b8`): `4.4172 / 5.2148 ms` at batch `128`,
+  `230.4038 / 100.0477 ms` at batch `2048`
+- projected `0.20` cached-dense latency: `0.3466 / 1.0618 ms`
+- projected `0.20` forced sparse CSR latency: `0.6607 / 2.7884 ms`
+- projected `0.20` packed lookup (`b4 / b8`): `2.8692 / 4.0883 ms` at batch `128`,
+  `219.2001 / 80.7821 ms` at batch `2048`
+
+Interpretation:
+
+- the model side moved forward: lower projected density is now a better frontier than
+  `0.35`
+- the systems side did not: sparse CSR and lookup-packed kernels both still lose to
+  cached dense inference on the projected models
+- because the clean packed-kernel follow-up intentionally used short timing loops to
+  keep the negative result affordable, any apparent dense-versus-cached-dense
+  crossover at very large batch should be treated as suggestive rather than
+  decision-grade
+
+### 3.6.3 Seed replication of projected `0.20` and a single-seed `0.15` follow-up
+
+The next follow-up checked whether the new `0.20` point was stable across more than
+one seed, and then pushed one step lower.
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density020-seed7.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density020-seed123.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density015-seed42.json`
+
+Seed replication of projected `0.20`:
+
+- seed `7`: dense RMSE `9.9809`, projected RMSE `9.4234`, density `0.20`
+- seed `123`: dense RMSE `9.6383`, projected RMSE `9.0070`, density `0.20`
+
+Single-seed lower-density follow-up:
+
+- seed `42`, projected `0.15`: dense RMSE `10.0171`, projected RMSE `9.3295`,
+  density about `0.15`
+
+CPU inference on the `0.15` follow-up:
+
+- cached dense projected latency: `0.3695 ms` at batch `128`, `1.0463 ms` at batch
+  `2048`
+- forced sparse CSR latency: `0.7057 ms` at batch `128`, `2.0630 ms` at batch
+  `2048`
+
+Interpretation:
+
+- projected `0.20` is now stable across multiple seeds and should be treated as the
+  current replicated frontier
+- projected `0.15` is the strongest single-seed quality-versus-density point seen so
+  far, but it still needs replication before it replaces `0.20` as the default
+  recommendation
+- even at density `0.15`, sparse CSR still loses to cached dense projected inference
+
+### 3.6.4 Replication of projected `0.15` and a single-seed `0.10` follow-up
+
+After the first promising `0.15` run, that point was replicated on the same extra
+seeds previously used for the `0.20` check.
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density015-seed7.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density015-seed123.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density010-seed42.json`
+
+Replication results for projected `0.15`:
+
+- seed `42`: dense RMSE `10.0171`, projected RMSE `9.3295`, density `0.15`
+- seed `7`: dense RMSE `9.9809`, projected RMSE `9.4330`, density `0.15`
+- seed `123`: dense RMSE `9.6383`, projected RMSE `9.0266`, density `0.15`
+
+Single-seed lower-density follow-up:
+
+- seed `42`, projected `0.10`: dense RMSE `10.0171`, projected RMSE `9.3453`,
+  density about `0.10`
+
+CPU inference on the `0.10` follow-up:
+
+- cached dense projected latency: `0.3495 ms` at batch `128`, `1.0411 ms` at batch
+  `2048`
+- forced sparse CSR latency: `0.5716 ms` at batch `128`, `1.7894 ms` at batch
+  `2048`
+
+Interpretation:
+
+- projected `0.15` is now the current best **replicated** quality-versus-density
+  point in the repo
+- projected `0.10` is the strongest single-seed candidate so far, but it still
+  needs replication before it replaces `0.15` as the default projected frontier
+- cached dense projected inference is still the correct CPU default even at `0.10`
+
+### 3.6.5 Replication of projected `0.10` and a single-seed `0.05` follow-up
+
+After projected `0.10` looked strong on seed `42`, that point was replicated on the
+same additional seeds already used for the projected `0.15` and `0.20` checks.
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density010-seed7.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density010-seed123.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density005-seed42.json`
+
+Replication results for projected `0.10`:
+
+- seed `42`: dense RMSE `10.0171`, projected RMSE `9.3453`, density `0.10`
+- seed `7`: dense RMSE `9.9809`, projected RMSE `9.4950`, density `0.10`
+- seed `123`: dense RMSE `9.6383`, projected RMSE `9.0607`, density `0.10`
+
+Single-seed lower-density follow-up:
+
+- seed `42`, projected `0.05`: dense RMSE `10.0171`, projected RMSE `9.4578`,
+  density about `0.05`
+
+CPU timing note:
+
+- the new `0.10` replication timing runs were noisy enough that only the quality
+  result should be treated as decision-grade
+- on the cleaner single-seed `0.05` follow-up, cached dense projected latency was
+  `0.4216 / 1.1203 ms` at batch `128 / 2048`, while forced sparse CSR was
+  `0.7145 / 1.6468 ms`
+
+Interpretation:
+
+- projected `0.10` is now the current best **replicated** quality-versus-density
+  point in the repo
+- projected `0.05` is the strongest single-seed candidate so far, but it still
+  needs replication before it replaces `0.10` as the default projected frontier
+- cached dense projected inference remains the CPU default; the new replications do
+  not justify a stronger CPU speed claim
+
+### 3.6.6 Replication of projected `0.05` and a lower-density `0.02` probe
+
+After projected `0.05` looked strong on seed `42`, that point was replicated on the
+same additional seeds already used for the projected `0.10`, `0.15`, and `0.20`
+checks.
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density005-seed7.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density005-seed123.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-wide-projected-density002-seed42.json`
+
+Replication results for projected `0.05`:
+
+- seed `42`: dense RMSE `10.0171`, projected RMSE `9.4578`, density `0.05`
+- seed `7`: dense RMSE `9.9809`, projected RMSE `9.5298`, density `0.05`
+- seed `123`: dense RMSE `9.6383`, projected RMSE `9.1808`, density `0.05`
+
+Lower-density follow-up:
+
+- seed `42`, projected `0.02`: dense RMSE `10.0171`, projected RMSE `9.7952`,
+  density about `0.02`
+
+CPU note:
+
+- cached dense projected inference still beat forced sparse CSR on the clean `0.05`
+  and `0.02` runs
+- no new CPU speed claim should be made here; the main new result is model-side
+  density robustness
+
+Interpretation:
+
+- projected `0.05` is now the current best **replicated** quality-versus-density
+  point in the repo
+- projected `0.02` still beats dense on seed `42`, but it is the first lower-density
+  follow-up that shows a noticeable quality bend relative to the `0.05` frontier
+- the model-side density chase is now far enough along that future work can either
+  replicate `0.02` or pivot back to structured sparsity and CPU execution around the
+  stronger replicated `0.05` point
+
+### 3.7 Binary Triton result still matters
 
 The packed Triton binary inference path is still faster than the unpacked
 reference path on larger matrix shapes, but the known large-batch regression at
@@ -285,7 +586,14 @@ The next session should assume:
 - naive free-running STE-to-shadow-free consolidation is too destructive on the
   nonlinear task to be the default bridge
 - density-projected STE-to-shadow-free handoff is the better current sparse
-  bridge, but it still needs either lower density or a faster sparse kernel
+  bridge, and on the wider `256`-feature nonlinear benchmark the best **replicated**
+  point is now projected `0.05`
+- projected `0.02` is the strongest lower-density single-seed candidate so far, but
+  it already shows the first meaningful quality bend relative to the `0.05` frontier
+- cached dense ternary inference is still the best CPU default on the projected
+  frontier; forced sparse CSR and the lookup-packed prototype are both slower there
+- dense wide references must be retuned before using wide comparisons as evidence
+- the current wide results are not yet enough to claim a robust GPU speed win
 - the next major ternary question is not whether sparse CPU inference can work at
   all; it is how to keep the ternary branch both useful and sparse on harder
   tasks

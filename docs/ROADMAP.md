@@ -47,27 +47,40 @@ overall direction.
 - reject new ternary claims if they only work on the easy linear benchmark and
   collapse to a near-zero-density residual branch
 - focus on closing the quality gap while lowering density on the nonlinear task
-- treat the new `projected` handoff family as the current best bridge between
-  quality and sparsity on that task
+- treat the `projected` handoff family as the current best bridge between quality
+  and sparsity on that task, with the replicated wide frontier now at density `0.05`
+  and a lower-density single-seed candidate already at `0.02`
+- on the wider `256`-feature nonlinear benchmark, use the tuned dense BF16
+  reference (`75` epochs, `3e-4`) rather than the old under-tuned pilot
 
-### 2.2 Turn sparse CPU wins into a more hardware-aligned path
+### 2.2 Turn CPU inference gains into a real speed win
 
-- the current shadow-free CPU win uses cached sparse execution, not a packed
-  ternary kernel
-- the new `projected` handoff reaches density `0.35` on the harder nonlinear
-  task, but sparse CPU inference is still slower than dense there
-- the next systems step is to move from unstructured sparse tensor execution to
-  block-sparse or bit-packed ternary kernels
-- keep measuring dense versus sparse variants separately so the source of any win
-  stays visible
+- the current shadow-free CPU win still comes from extreme sparsification plus a
+  sparse execution path, not from a general packed ternary kernel
+- the projected frontier improved from density `0.35` to a replicated `0.05`
+  point without giving back the wide-benchmark quality win, and a single-seed
+  `0.02` follow-up still beat dense while showing the first meaningful quality bend
+- forced sparse CSR is still slower than cached dense inference at `0.20`, `0.15`,
+  `0.10`, `0.05`, and `0.02` on the cleaner runs
+- the newer density sweeps strengthen the model-side story, but still do not create
+  a robust new CPU speed claim
+- the first genuinely packed lookup prototype was strongly negative at both density
+  `0.35` and `0.20`; do not treat lookup-packed execution as the likely production
+  direction anymore
+- the biggest systems improvement so far still comes from caching exact dense ternary
+  weights in eval mode; that remains the CPU baseline new systems work must beat
+- keep measuring dense, cached-dense ternary, and any new structured or sparse path
+  separately so the source of any win stays visible
 
 ### 2.3 Revisit GPU training speed honestly
 
-- current ternary work does not yet show a training-speed advantage on GPU
+- current ternary work still does not show a robust training-speed advantage on GPU
+- one wide projected comparison run finished faster than its paired dense run, but
+  standalone dense timing varied a lot, so this is not yet a claim
 - if GPU speed becomes the next focus, prioritize:
+  - repeated runs and step-time measurement, not one-off wall-clock totals
   - fused evidence accumulation for `ShadowFreeTernaryLinear`
   - structured updates that reduce memory traffic
-  - benchmarking step time directly instead of only total runtime
 - avoid claiming pretraining wins until that path is actually measured
 
 ### 2.4 Tune wide dense BF16 references before drawing wider conclusions
@@ -148,45 +161,50 @@ Reasoning:
   benchmark can get close to dense
 - naive direct-discrete consolidation reached useful sparsity but collapsed to
   RMSE `25.8914` on the nonlinear task
-- density-projected handoff reached RMSE `18.4060` at density `0.35`, which is
-  the best current quality at a sparse-ready density
-- the remaining blocker is now either lower density without another quality cliff
-  or a better sparse/packed ternary inference kernel
+- density-projected handoff reached RMSE `18.4060` at density `0.35` on the
+  small nonlinear benchmark, `9.3466` at density `0.35` on the wide benchmark,
+  `9.4578` in the replicated `0.05` regime, and `9.7952` at a lower-density
+  single-seed `0.02` probe
+- on the wide benchmark, projected now beats the tuned dense reference and the wide
+  STE point while also moving materially lower in density
+- the remaining blocker is still the systems side: cached dense ternary CPU
+  inference is the best projected execution path so far, while sparse CSR and the
+  lookup-packed prototype both remain slower
 
 ## 5. Suggested First Milestone
 
 If work resumes now, the first milestone should be:
 
-1. keep the new `projected` handoff as the harder-task sparse baseline
-2. sweep projection densities and recovery schedules around the current `0.35`
-   operating point
-3. compare:
-   - dense BF16 baseline
-   - STE ternary
-   - free-running hybrid consolidation
-   - density-projected handoff
-4. only then decide whether the next effort should go into lower-density model
-   schedules or a packed ternary CPU kernel
+1. treat replicated projected `0.05` as the stable ternary frontier on the wide
+   nonlinear benchmark
+2. treat projected `0.02` as an exploratory bend-check, not yet as the stable
+   default frontier
+3. keep cached dense ternary inference as the CPU default for both points
+4. if model-side work continues, first decide whether `0.02` is worth replicating or
+   whether `0.05` is the better stopping point for systems work
+5. bias future systems work toward structured sparsity or truly different packed
+   kernels, not lookup-packed prototypes
 
 ## 6. Recommended Execution Order
 
 If work resumes now, the recommended order is:
 
 1. keep the binary path intact as the stable published baseline
-2. improve the nonlinear residual benchmark until it is the accepted ternary
-   quality gate
-3. treat the density-projected STE-to-shadow-free handoff as the current handoff
-   baseline
-4. add lower-density or structured-sparsity controls so CPU speed can improve
-   without another accuracy cliff
-5. benchmark CPU latency again with the model-side density held fixed
-6. only then spend effort on custom CUDA update kernels or a packed ternary CPU
-   kernel
+2. treat the nonlinear residual benchmark as the accepted ternary quality gate
+3. treat the wide `256`-feature projected `0.05` handoff result as the current
+   replicated ternary frontier to beat, while treating `0.02` as the next bend-check
+   candidate
+4. treat cached dense projected inference as the CPU baseline that any new sparse
+   kernel must beat
+5. replicate runtime on that wide benchmark so the GPU speed story is either real
+   or ruled out cleanly
+6. pursue lower-density or structured-sparsity projected variants and genuinely
+   different packed kernels only if they can outperform cached dense inference
 
 This sequence keeps the repo scientifically clean:
 
 - first make the ternary claim robust on a meaningful task
-- then improve the systems path
+- then compare new systems work against the true best current CPU path
 - only then claim anything about training efficiency
 
 ## 7. Decision Note For Future Sessions
@@ -198,5 +216,11 @@ to:
 - treating the shadow-free linear result as a real but narrow proof of concept
 - treating the nonlinear residual benchmark as the primary ternary quality gate
 - treating the density-projected handoff as the current best sparse-friendly
-  nonlinear baseline
-- avoiding strong claims about GPU training speed until step-time evidence exists
+  nonlinear baseline, especially the replicated wide `0.05` point on the
+  `256`-feature benchmark
+- treating the wide `0.02` point as the first meaningful bend-check candidate rather
+  than as an already-promoted frontier
+- treating cached dense projected inference, not forced sparse CSR or lookup-packed
+  execution, as the current default CPU path on that frontier
+- avoiding strong claims about GPU training speed until repeated timing or
+  step-time evidence exists
