@@ -29,6 +29,7 @@ class TrainingConfig:
     seed: int = 42
     accelerator: str = "auto"
     devices: int | str = 1
+    precision: str | int = "32-true"
     enable_progress_bar: bool = False
 
 
@@ -197,11 +198,20 @@ class RegressionLightningModule(L.LightningModule):
             weight_decay=self.weight_decay,
         )
 
+    def extra_parameter_count(self) -> int:
+        extra_parameter_count = getattr(self.model, "extra_parameter_count", None)
+        if callable(extra_parameter_count):
+            return int(extra_parameter_count())
+        return 0
+
     def optimizer_step(self, *args, **kwargs) -> None:
         super().optimizer_step(*args, **kwargs)
         clip_weights = getattr(self.model, "clip_weights_", None)
         if callable(clip_weights):
             clip_weights()
+        apply_discrete_updates = getattr(self.model, "apply_discrete_updates_", None)
+        if callable(apply_discrete_updates):
+            apply_discrete_updates()
 
 
 def trainer_device_name(trainer: L.Trainer) -> str:
@@ -244,6 +254,7 @@ def build_trainer(
         max_epochs=training_config.epochs,
         accelerator=training_config.accelerator,
         devices=training_config.devices,
+        precision=training_config.precision,
         logger=False,
         enable_progress_bar=training_config.enable_progress_bar,
         enable_model_summary=False,
@@ -283,7 +294,7 @@ def predict_regression_metrics(
     if not tensor_batches:
         raise RuntimeError("Prediction returned no tensor batches.")
 
-    predictions_scaled = torch.cat(tensor_batches, dim=0).cpu().numpy()
+    predictions_scaled = torch.cat(tensor_batches, dim=0).to(torch.float32).cpu().numpy()
     predictions_original = (
         predictions_scaled * model.target_scale + model.target_mean
     ).reshape(-1)
@@ -306,7 +317,11 @@ def _synchronize_if_cuda_available() -> None:
 
 
 def _count_model_parameters(model: nn.Module) -> int:
-    return sum(parameter.numel() for parameter in model.parameters())
+    total = sum(parameter.numel() for parameter in model.parameters())
+    extra_parameter_count = getattr(model, "extra_parameter_count", None)
+    if callable(extra_parameter_count):
+        total += int(extra_parameter_count())
+    return total
 
 
 def train_regression_model(

@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-03-17
+Last updated: 2026-03-18
 
 This document records the current next-step plan and the open design decisions.
 It is meant to be actionable rather than historical.
@@ -12,190 +12,175 @@ and what decisions still need to be made.
 
 ## 1. What Was Just Finished
 
-The last completed workstream delivered:
+The latest completed workstream delivered:
 
-- exportable binary sweeps
-- packed Triton inference for `BinaryLinear`
-- microkernel benchmarking
-- trained-model end-to-end inference benchmarking
-- comparison-script integration of model-level inference timing
-- artifact-level summary and frontier extraction for sweep and trained-model
-  benchmark outputs
-- default binary shortcut and Triton ablation matrix automation in the
-  trained-model benchmark
-- output routing under `/mnt` for generated artifacts and checkpoints
+- a direct-discrete `ShadowFreeTernaryLinear` prototype
+- an STE `TernaryLinear` baseline beside it
+- sparse CPU inference caches for both ternary families
+- BF16 support in the shared training path
+- a nonlinear residual benchmark mode for harder sanity checks
+- a new ternary comparison entry point with artifact export
+- one decision-grade shadow-free proof of concept on the original linear task
+- one decision-grade STE follow-up on the harder nonlinear task
 
-That means the repo now has both quality-oriented and systems-oriented evidence,
-not just architecture experiments.
+That means the repo is no longer binary-only. It now has a real ternary branch
+with one positive result and one meaningful constraint.
 
 ## 2. Immediate Next Steps
 
 These are the highest-priority next tasks if work resumes without changing the
 overall direction.
 
-Operational caveat:
+### 2.0 Preserve the current decision-grade ternary artifacts
 
-- the latest stored outputs under `/mnt/binary_nn/artifacts/smoke/` are smoke
-  runs, not the full decision-grade benchmark bundle
-- use them to validate export and reporting paths only
-- do not use them to update the binary versus dense quality story or the Triton
-  speedup story
+- keep `/mnt/binary_nn/artifacts/2026-03-18-shadowfree-poc.json` as the current
+  shadow-free reference
+- keep `/mnt/binary_nn/artifacts/2026-03-18-ste-nonlinear-followup.json` as the
+  current harder-task ternary reference
+- do not overwrite those names casually; future iterations should use new dated
+  artifact names
 
-### 2.0 Refresh the decision-grade artifact bundle
+### 2.1 Improve the harder-task ternary story
 
-- rerun the binary sweep on the normal grid so the frontier reflects real epoch
-  budgets rather than smoke settings
-- rerun the trained-model inference benchmark on the default batch-size matrix
-  and keep the shortcut and Triton ablations enabled
-- rerun the packed kernel benchmark on the large CUDA shapes that match the
-  documented systems story
-- write these outputs to the normal artifact location under `/mnt/binary_nn/artifacts/`
-  and preserve `smoke/` as a separate validation-only namespace
+- treat `target_kind="nonlinear_residual"` as the default ternary stress test
+- reject new ternary claims if they only work on the easy linear benchmark and
+  collapse to a near-zero-density residual branch
+- focus on closing the quality gap while lowering density on the nonlinear task
 
-### 2.1 Keep benchmark outputs decision-ready
+### 2.2 Turn sparse CPU wins into a more hardware-aligned path
 
-- keep exporting JSON and CSV for all important sweeps and benchmarks
-- preserve artifact-level summaries and frontier exports as the default path,
-  not an optional extra step
-- keep trained-model quality metrics and latency in the same records
+- the current shadow-free CPU win uses cached sparse execution, not a packed
+  ternary kernel
+- the next systems step is to move from unstructured sparse tensor execution to
+  block-sparse or bit-packed ternary kernels
+- keep measuring dense versus sparse variants separately so the source of any win
+  stays visible
 
-### 2.2 Use the ablation matrix as the binary baseline gate
+### 2.3 Revisit GPU training speed honestly
 
-- treat shortcut on or off and Triton on or off as the standard binary systems
-  matrix when evaluating major binary changes
-- avoid mixing architecture gains with kernel gains in the same conclusion
-- reject binary changes that do not beat the current baseline cleanly on that
-  matrix
+- current ternary work does not yet show a training-speed advantage on GPU
+- if GPU speed becomes the next focus, prioritize:
+  - fused evidence accumulation for `ShadowFreeTernaryLinear`
+  - structured updates that reduce memory traffic
+  - benchmarking step time directly instead of only total runtime
+- avoid claiming pretraining wins until that path is actually measured
 
-### 2.3 Expand the Triton path carefully
+### 2.4 Tune wide dense BF16 references before drawing wider conclusions
 
-- keep training on the existing PyTorch path unless there is strong reason to
-  change it
-- extend the packed inference path only where it can be benchmarked clearly
-- prefer end-to-end model wins over microkernel wins when choosing priorities
-- treat `torch.set_float32_matmul_precision('high'|'medium')` as part of fair
-  GPU benchmarking hygiene for wide dense-versus-binary comparisons
-- prioritize the `(16384, 1024, 1024)` kernel regression specifically, because
-  profiling now shows that this is a kernel-local loss, not just full-model
-  overhead
-- note that the first autotune expansion improved the `2048` regime but did not
-  fix `8192` or `16384`, so the next iteration should target kernel design, not
-  just a few more config entries
-- keep the current conservative large-batch Triton fallback in place until the
-  kernel genuinely wins again at the highest tested batch
-
-### 2.4 Prepare the next representation baseline
-
-- do not refactor the current binary path away
-- add the smallest possible ternary or int2 research prototype beside the
-  existing binary baseline
-- make sure the prototype is benchmarkable with the same artifact and ablation
-  machinery already used for the binary path
+- the wide `256`-feature pilot showed that a dense BF16 MLP can look worse than
+  the ternary path if it is under-tuned
+- future wide comparisons must retune the dense baseline before using those runs
+  as evidence
 
 ## 3. Open Design Decision
 
-The main open decision now is how to approach the next kernel and model family.
+The main open decision now is how to push the ternary branch forward.
 
 There are three plausible paths.
 
-### 3.1 Option A: Binary-first path
+### 3.1 Option A: Shadow-free first
 
-Keep pushing the current strict-binary route.
-
-Pros:
-
-- smallest disruption to the current codebase
-- easiest to extend from the existing Triton implementation
-- fastest path to deeper end-to-end speed experiments
-
-Cons:
-
-- may diverge from the practical BitNet-style deployment frontier
-- may over-invest in a representation that is less attractive than ternary in
-  the long run
-
-### 3.2 Option B: Ternary or int2 pivot
-
-Shift the systems path toward a BitNet-like packed ternary or int2
-representation.
+Keep pushing the direct-discrete branch immediately.
 
 Pros:
 
-- closer to what works publicly at scale for 1-bit or near-1-bit LLM systems
-- stronger long-term research relevance for later LLM transfer
+- most novel optimization idea in the repo
+- strongest long-term fit with the repo's original research direction
+- naturally creates sparse states that are attractive for CPU inference
 
 Cons:
 
-- larger architecture and kernel change
-- likely requires new model layers, packing code, and new benchmarking logic
+- currently works best only on the easy linear benchmark
+- degrades badly on the harder nonlinear task
+- still lacks a GPU training-speed win
 
-### 3.3 Option C: Hybrid staged path
+### 3.2 Option B: STE ternary first
 
-Keep the current binary path as the stable baseline and build a parallel ternary
-prototype without replacing it yet.
+Use the STE ternary branch as the main ternary baseline and delay direct-discrete
+optimization work.
 
 Pros:
 
-- preserves current progress
-- gives a clean A/B comparison between binary and ternary systems paths
-- reduces risk of losing a working baseline while exploring the more relevant
-  longer-term direction
+- better quality behavior on the nonlinear benchmark
+- simpler to tune and reason about
+- closer to a practical BitNet-like training baseline
 
 Cons:
 
-- more code to maintain temporarily
-- slightly slower than a full commitment to one direction
+- less novel
+- currently too dense to win on CPU sparse inference
+- risks turning into another quantization-aware branch without solving the
+  discrete-optimization problem
+
+### 3.3 Option C: Hybrid bootstrap path
+
+Use STE ternary as a warm-start or quality anchor, then convert or consolidate
+into a shadow-free sparse state.
+
+Pros:
+
+- matches the evidence now in hand
+- keeps the quality-friendly branch and the sparse/direct branch connected
+- offers the best chance of getting both quality and CPU efficiency
+
+Cons:
+
+- more engineering than committing to one branch immediately
+- requires careful experiment design to avoid mixing two effects
 
 ## 4. Recommended Direction
 
-Current recommendation: **Option C, the hybrid staged path**.
+Current recommendation: **Option C, the hybrid bootstrap path**.
 
 Reasoning:
 
-- the current binary route is now strong enough to serve as a stable systems and
-  quality baseline
-- the next meaningful research question is whether a ternary or int2-style path
-  beats that binary baseline, not whether binary is worth keeping at all
-- the hybrid path makes that question testable without sacrificing the working
-  benchmark stack already built
+- the shadow-free branch already proves that direct-discrete sparse CPU wins are
+  plausible
+- the STE branch already shows that ternary quality on the harder nonlinear
+  benchmark can get close to dense
+- the missing link is a staged method that starts from a quality-friendly ternary
+  solution and then consolidates into a sparse shadow-free state
 
-## 5. Suggested First Milestone If Option C Is Chosen
+## 5. Suggested First Milestone
 
-If the hybrid path is chosen, the first milestone should be:
+If work resumes now, the first milestone should be:
 
-1. add a ternary linear prototype layer
-2. add a packed ternary or int2 microbenchmark
-3. benchmark it against the existing binary Triton path
-4. only then decide whether the regression model itself should get a ternary
-   training or inference variant
+1. add a warm-start experiment that trains the STE ternary model first
+2. project that solution into a shadow-free ternary state
+3. continue training with direct-discrete updates
+4. compare:
+   - dense BF16 baseline
+   - STE ternary
+   - pure shadow-free ternary
+   - STE-to-shadow-free hybrid
+5. only then decide whether to spend time on a packed ternary kernel
 
 ## 6. Recommended Execution Order
 
 If work resumes now, the recommended order is:
 
-1. redesign or specialize the packed Triton kernel for the regressing
-  `(16384, 1024, 1024)` operating point, since the first autotune expansion was
-  insufficient
-2. keep wide dense-versus-binary comparisons on explicit `high` or `medium`
-  matmul precision so the baseline story stays fair for both dense and
-  binary no-Triton paths
-3. keep the conservative fallback policy until the specialized kernel is ready,
-  so wide runs do not regress catastrophically in the meantime
-4. add one minimal ternary or int2 layer prototype with matching benchmark
-  hooks
-5. compare binary versus ternary on kernel behavior first, and only then on
-  regression quality
+1. keep the binary path intact as the stable published baseline
+2. improve the nonlinear residual benchmark until it is the accepted ternary
+   quality gate
+3. prototype the STE-to-shadow-free handoff
+4. add target-density or structured-sparsity controls so CPU speed can improve
+   without relying on accidental collapse
+5. benchmark CPU latency again
+6. only then spend effort on custom CUDA update kernels or a packed ternary CPU
+   kernel
 
 This sequence keeps the repo scientifically clean:
 
-- first improve decision quality around the working binary baseline
-- then open the next representation branch
-- only then spend effort on broader architecture changes
+- first make the ternary claim robust on a meaningful task
+- then improve the systems path
+- only then claim anything about training efficiency
 
 ## 7. Decision Note For Future Sessions
 
-If a future session begins without user input on the open decision, default to:
+If a future session begins without user input on the next ternary choice, default
+to:
 
-- maintaining the current binary path
-- improving documentation and benchmark hygiene
-- avoiding a large ternary refactor until the decision is explicit
+- keeping the binary baseline untouched
+- treating the shadow-free linear result as a real but narrow proof of concept
+- treating the nonlinear residual benchmark as the primary ternary quality gate
+- avoiding strong claims about GPU training speed until step-time evidence exists

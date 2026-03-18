@@ -1,6 +1,6 @@
 # Current Status
 
-Last updated: 2026-03-17
+Last updated: 2026-03-18
 
 This document is the short operational memory for the repository. It is meant
 to answer three questions quickly:
@@ -16,62 +16,57 @@ the current implementation state.
 
 ## 1. Current Technical State
 
-The repository currently has four working layers of functionality.
+The repository now has five working layers of functionality.
 
-### 1.1 Regression training baseline
+### 1.1 Dense and binary baseline path
 
 - Dense regression baseline exists and is stable.
 - Binary regression baseline exists and is stable.
-- Both run through the shared Lightning training utilities in
+- Both still run through the shared Lightning training utilities in
   `src/regression_experiment.py`.
+- The binary path remains the main stable low-bit baseline.
 
-### 1.2 Binary model architecture
+### 1.2 Binary systems path
 
-- The current best binary architecture is a residual binary regressor.
-- The binary path uses `BinaryLinear` layers plus `Hardtanh`.
-- A dense input shortcut is enabled by default and is currently important for
-  quality.
-- Current default binary configuration is:
-  - hidden dims: `(8,)`
-  - learning rate: `3e-3`
+- `BinaryLinear` still has an eval-only packed Triton inference path on CUDA.
+- Training still uses the normal PyTorch floating-point path for binary models.
+- Packed inference is implemented for binary sign weights plus a per-output
+  scale.
 
-### 1.3 Systems path
+### 1.3 New ternary research path
 
-- `BinaryLinear` has an eval-only packed Triton inference path.
-- Training still uses the normal PyTorch floating-point path so optimization is
-  unchanged.
-- Packed inference is currently implemented for binary sign weights plus a
-  per-output scale.
+- `src/regression_models.py` now contains two ternary families:
+  - `TernaryLinear` / `TernaryRegressor`
+    - STE-trained ternary weights in `{-1, 0, +1}`
+    - cached sparse CPU inference path
+  - `ShadowFreeTernaryLinear` / `ShadowFreeTernaryRegressor`
+    - discrete ternary state stored directly
+    - batch-evidence accumulation plus thresholded direct state updates
+    - cached sparse CPU inference path
+- `src/run_ternary_regression.py` trains the STE ternary branch.
+- `src/run_shadowfree_ternary_regression.py` trains the direct-discrete
+  shadow-free branch.
+- `src/run_ternary_research_comparison.py` compares a dense baseline against one
+  ternary branch and writes JSON plus CSV artifacts under `/mnt`.
 
-### 1.4 Benchmarking and experiment tooling
+### 1.4 Shared training and data improvements
 
-- Binary sweep script supports JSON and CSV export.
-- Binary sweep script now also emits summary and frontier artifacts.
-- Kernel microbenchmark exists for packed Triton inference and now emits JSON,
-  CSV, summary, and frontier artifacts.
-- Model-level inference benchmark exists for trained dense and binary models.
-- Model-level inference benchmark now automates the shortcut and Triton ablation
-  matrix by default.
-- Model-level inference benchmark now also supports configurable regression
-  feature count, so larger-width trained-model runs can be benchmarked without
-  editing code.
-- Model-level inference benchmark now also supports configurable float32
-  matmul precision, which matters on Tensor Core GPUs for fair dense versus
-  binary systems comparisons.
-- The dense-vs-binary comparison entry point now also supports explicit float32
-  matmul precision, so comparison runs can use the same GPU benchmarking hygiene
-  as the standalone model benchmark.
-- The dense-vs-binary comparison entry point now also supports configurable
-  feature count, so wide trained-model comparisons can be run from the same
-  workflow that produces quality and runtime deltas.
-- The dense-vs-binary comparison script now includes a model-level inference
-  benchmark section by default and now emits a comparison artifact bundle.
-- Generated artifacts and Lightning checkpoints are now routed under `/mnt`, not
+- `TrainingConfig` now supports explicit Lightning `precision`, so BF16 dense
+  baselines can be trained from the shared path.
+- BF16 prediction outputs are now cast back to float32 before NumPy conversion,
+  which fixed an actual bug in the shared evaluation path.
+- `RegressionDataConfig` now supports `target_kind="nonlinear_residual"` plus
+  nonlinear-control knobs. The original linear regression benchmark remains the
+  default.
+
+### 1.5 Benchmarking and artifact tooling
+
+- Binary benchmarking and artifact export remain intact.
+- The new ternary comparison script writes:
+  - full comparison JSON
+  - CPU inference latency CSV
+- Generated artifacts and Lightning checkpoints still route under `/mnt`, not
   back into the repository tree.
-- The latest checked-in bundle under `/mnt/binary_nn/artifacts/smoke/` should be
-  treated as smoke validation only. It is useful for verifying export paths and
-  benchmark plumbing, but it is not the decision-grade baseline for binary
-  quality or Triton speedups.
 
 ## 2. Most Important Files
 
@@ -88,15 +83,18 @@ The files below are the main entry points to understand or continue the work.
 - `src/run_regression_baseline.py`
 - `src/run_binary_regression.py`
 - `src/run_regression_comparison.py`
+- `src/run_shadowfree_ternary_regression.py`
+- `src/run_ternary_regression.py`
+- `src/run_ternary_research_comparison.py`
 
-### 2.3 Sweep and benchmark entry points
+### 2.3 Data and experiment configuration
 
-- `src/run_binary_regression_sweep.py`
-- `src/benchmark_packed_binary_kernels.py`
-- `src/benchmark_model_inference.py`
+- `src/regression_data.py`
+- `src/regression_experiment.py`
 
 ### 2.4 Core memory documents
 
+- `docs/TERNARY_RESEARCH_EXPERIMENT_LOG.md`
 - `docs/BINARY_REGRESSION_EXPERIMENT_LOG.md`
 - `docs/CURRENT_STATUS.md`
 - `docs/ROADMAP.md`
@@ -105,7 +103,7 @@ The files below are the main entry points to understand or continue the work.
 
 ### 3.1 Quality-oriented binary regression point
 
-On the regression task used in the repo:
+On the original linear regression task used in the repo:
 
 - binary hidden dims `(8,)`
 - learning rate `3e-3`
@@ -113,8 +111,8 @@ On the regression task used in the repo:
 - RMSE `12.4447`
 - total runtime `8.5400s`
 
-This configuration is slightly better than the dense baseline on quality while
-remaining very close on runtime.
+This configuration is still slightly better than the dense baseline on quality
+while remaining close on runtime.
 
 ### 3.2 Speed-oriented binary regression point
 
@@ -126,107 +124,125 @@ On the same task:
 - RMSE `15.1069`
 - total runtime `3.5248s`
 
-This configuration is materially faster than dense while staying close on
+This configuration is still materially faster than dense while staying close on
 accuracy.
 
-### 3.3 Triton kernel finding
+### 3.3 Shadow-free ternary proof of concept
 
-The packed Triton binary inference path is already faster than the unpacked
-reference path on larger matrix shapes.
+The new direct-discrete ternary branch now has one real proof-of-concept win on
+the original linear regression benchmark.
 
-Latest larger-shape decision bundle on `NVIDIA L4`:
+Dense BF16 baseline on `NVIDIA L4`:
 
-- `(512, 2048, 2048)`: about `2.65x` speedup
-- `(1024, 4096, 4096)`: about `2.54x` speedup
-- `(1024, 8192, 8192)`: about `2.72x` speedup
-- observed max absolute error stayed around `0.0018` to `0.0020`
+- hidden dims `(64, 32)`
+- RMSE `14.8845`
+- total runtime `6.9923s`
 
-### 3.4 End-to-end model finding
+Shadow-free ternary residual on the same task:
 
-The Triton advantage survives at full-model inference level, not just in an
-isolated microkernel benchmark.
+- hidden dims `(64,)`
+- initial density `0.25`
+- update interval `1`
+- RMSE `12.1707`
+- total runtime `7.9168s`
+- final ternary nonzero density `0.0172`
 
-Important nuance from the refreshed benchmarks:
+CPU inference result from `/mnt/binary_nn/artifacts/2026-03-18-shadowfree-poc.json`:
 
-- on the original tiny `10`-feature regression benchmark, latency is mostly
-  overhead-bound, so large batch sizes do not materially change the story
-- on a wider trained-model benchmark with `1024` input features and
-  hidden dims `(1024, 1024)`, Triton improves binary latency at batch sizes
-  `512`, `2048`, and `8192`, but regresses at `16384`
-- targeted profiling at shape `(16384, 1024, 1024)` shows that regression is
-  kernel-local: the packed Triton binary layer itself is slower than the
-  reference path there, not just the full model around it
-- after expanding the Triton autotune space, the binary Triton path improved at
-  the mid-range wide batches, but the kernel-local regression at
-  `(16384, 1024, 1024)` still remains
-- a conservative runtime fallback now disables Triton for the known losing
-  large-batch shape regime, so the model path no longer pays the worst known
-  penalty at batch `16384`
-- wide dense results are highly sensitive to `torch.set_float32_matmul_precision`
-  on `NVIDIA L4`; under `medium`, the dense `(1024, 1024)` model becomes much
-  faster than the earlier default-precision measurements suggested
-- wide binary no-Triton results are also highly sensitive to matmul precision;
-  `high` and `medium` roughly halve latency versus `highest` at the larger
-  tested batches
+- batch `32`: about `1.03x` speedup versus dense
+- batch `128`: about `3.46x` speedup versus dense
+- batch `512`: about `3.54x` speedup versus dense
+
+Important nuance:
+
+- this is an inference win, not a training-speed win
+- the shadow-free branch became extremely sparse on the linear task
+- the dense shortcut remains important; the result should be read as a sparse
+  residual decomposition, not as a no-shortcut ternary MLP victory
+
+### 3.4 Nonlinear follow-up result
+
+On the harder `target_kind="nonlinear_residual"` benchmark:
+
+Dense BF16 baseline:
+
+- hidden dims `(64, 32)`
+- RMSE `15.6111`
+
+STE ternary residual:
+
+- hidden dims `(64, 32)`
+- threshold scale `0.5`
+- RMSE `15.8289`
+- ternary nonzero density `0.6851`
+
+Interpretation:
+
+- the STE ternary branch is now the stronger quality baseline on the harder
+  nonlinear task
+- the quality gap is small, but CPU sparse inference is still slower than dense
+  at this density
+- the shadow-free route is not yet the right harder-task baseline
+
+Artifacts:
+
+- `/mnt/binary_nn/artifacts/2026-03-18-ste-nonlinear-followup.json`
+- `/mnt/binary_nn/artifacts/2026-03-18-ste-nonlinear-followup-cpu.csv`
+
+### 3.5 Binary Triton result still matters
+
+The packed Triton binary inference path is still faster than the unpacked
+reference path on larger matrix shapes, but the known large-batch regression at
+`(16384, 1024, 1024)` remains unresolved.
 
 ## 4. What Has Been Validated
 
 The following has already been checked and should be treated as known working
 ground unless a future change breaks it.
 
-### 4.1 Focused tests
+### 4.1 Tests
 
-The focused regression, sweep, comparison, and kernel tests have been passing
-during the recent iterations.
+- the full test suite passes
+- new ternary sparse-inference equivalence tests pass
+- new nonlinear-data smoke tests pass
 
-### 4.2 Comparison workflow
+### 4.2 BF16 shared path
 
-`src/run_regression_comparison.py` now prints:
-
-- task-quality metrics
-- training/runtime deltas
-- model-level inference benchmark records
+- BF16 dense baselines now work from the shared training path
+- the earlier BF16 prediction-to-NumPy failure has been fixed
 
 ### 4.3 Artifact export
 
-The repository now emits machine-readable benchmark artifacts under `/mnt`, with
-default benchmark outputs written to `/mnt/binary_nn/artifacts/`.
+The repository now emits machine-readable ternary comparison artifacts under
+`/mnt/binary_nn/artifacts/` in addition to the earlier binary artifacts.
 
-The latest decision-grade refresh is stored under:
+The most important new result bundle is:
 
-- `/mnt/binary_nn/artifacts/2026-03-17-decision/`
+- `/mnt/binary_nn/artifacts/2026-03-18-shadowfree-poc.json`
 
 ## 5. Assumptions For The Next Session
 
 The next session should assume:
 
-- binary residual regression is the correct baseline, not the original plain
-  binary MLP
-- the dense shortcut is currently a feature, not a bug or temporary hack
-- the Triton packed path is real and worth extending
-- the smoke artifacts are still validation-only, but a decision-grade refresh
-  now exists under `/mnt/binary_nn/artifacts/2026-03-17-decision/`
-- the small `10`-feature model benchmark is useful for workflow validation, but
-  the wider `1024`-feature benchmark is the more representative systems read
-- the current systems question is no longer whether Triton helps at all; it is
-  why the current kernel loses at shape `(16384, 1024, 1024)`
-- future wide dense-versus-binary comparisons should set float32 matmul
-  precision explicitly, preferably `high` or `medium`, to avoid undercounting
-  dense and binary no-Triton GEMM throughput on Tensor Core GPUs
-- the current Triton autotune surface is better than before for mid-range wide
-  batches, but still not sufficient to recover the highest tested batch
-- the comparison workflow can now be used directly for wide experiments, and the
-  Triton-on records at the highest tested batch may reflect fallback to the
-  reference path rather than actual Triton execution
-- the next major design decision is not whether to do custom kernels, but
-  whether to stay strict binary or begin a parallel ternary or int2 path
+- binary residual regression is still the correct stable baseline
+- the shadow-free ternary route is validated only on the easy linear benchmark
+- the shadow-free CPU win comes from extreme sparsification plus cached sparse
+  CPU execution
+- the current shadow-free result is not evidence of faster GPU training
+- the nonlinear residual benchmark is the better sanity check for whether the
+  ternary branch is actually carrying nonlinear load
+- the STE ternary branch is currently the better harder-task quality reference
+- the next major ternary question is not whether sparse CPU inference can work at
+  all; it is how to keep the ternary branch both useful and sparse on harder
+  tasks
 
 ## 6. Recommended First Read Order
 
 If a future session needs to rebuild context fast, read in this order:
 
 1. `docs/CURRENT_STATUS.md`
-2. `docs/ROADMAP.md`
-3. `docs/BINARY_REGRESSION_EXPERIMENT_LOG.md`
-4. `src/regression_models.py`
-5. `src/binary_kernels.py`
+2. `docs/TERNARY_RESEARCH_EXPERIMENT_LOG.md`
+3. `docs/ROADMAP.md`
+4. `src/run_ternary_research_comparison.py`
+5. `src/regression_models.py`
+6. `src/regression_data.py`

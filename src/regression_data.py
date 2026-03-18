@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import lightning as L
 import numpy as np
@@ -17,6 +18,9 @@ class RegressionDataConfig:
     n_features: int = 10
     n_informative: int = 10
     noise: float = 12.0
+    target_kind: Literal["linear", "nonlinear_residual"] = "linear"
+    nonlinear_scale: float = 1.0
+    nonlinear_pair_count: int = 4
     batch_size: int = 128
     num_workers: int = 0
     val_fraction: float = 0.2
@@ -37,14 +41,50 @@ class RegressionDataBundle:
     test_targets_original: np.ndarray
 
 
+def _create_nonlinear_regression(config: RegressionDataConfig) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(config.random_state)
+    features = rng.standard_normal((config.n_samples, config.n_features)).astype(np.float32)
+    informative = min(config.n_informative, config.n_features)
+    linear_weights = rng.normal(size=informative).astype(np.float32)
+    targets = features[:, :informative].dot(linear_weights)
+
+    pair_count = min(config.nonlinear_pair_count, informative // 2)
+    nonlinear_residual = np.zeros(config.n_samples, dtype=np.float32)
+    for pair_idx in range(pair_count):
+        left = pair_idx
+        right = informative - pair_idx - 1
+        left_feature = features[:, left]
+        right_feature = features[:, right]
+        nonlinear_residual += np.sin(left_feature * right_feature).astype(np.float32)
+        nonlinear_residual += 0.5 * np.tanh(left_feature + 0.5 * right_feature).astype(
+            np.float32
+        )
+
+    if informative > 0:
+        quadratic_count = min(4, informative)
+        nonlinear_residual += 0.25 * np.sum(
+            np.square(features[:, :quadratic_count]),
+            axis=1,
+        ).astype(np.float32)
+
+    noise = rng.normal(scale=config.noise, size=config.n_samples).astype(np.float32)
+    targets = targets + config.nonlinear_scale * nonlinear_residual + noise
+    return features, targets.astype(np.float32)
+
+
 def create_regression_dataloaders(config: RegressionDataConfig) -> RegressionDataBundle:
-    features, targets = make_regression(
-        n_samples=config.n_samples,
-        n_features=config.n_features,
-        n_informative=config.n_informative,
-        noise=config.noise,
-        random_state=config.random_state,
-    )
+    if config.target_kind == "linear":
+        features, targets = make_regression(
+            n_samples=config.n_samples,
+            n_features=config.n_features,
+            n_informative=config.n_informative,
+            noise=config.noise,
+            random_state=config.random_state,
+        )
+    elif config.target_kind == "nonlinear_residual":
+        features, targets = _create_nonlinear_regression(config)
+    else:
+        raise ValueError(f"Unsupported target_kind: {config.target_kind!r}")
 
     x_train_val, x_test, y_train_val, y_test = train_test_split(
         features,
