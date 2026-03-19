@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from typing import SupportsFloat, cast
 
 import lightning as L
@@ -13,7 +15,11 @@ from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from torch import nn
 
 from output_paths import checkpoint_root
-from regression_data import RegressionDataConfig, RegressionDataModule
+from regression_data import (
+    RegressionDataConfig,
+    RegressionDataModule,
+    create_regression_dataloaders,
+)
 
 
 type Batch = tuple[torch.Tensor, torch.Tensor]
@@ -48,6 +54,37 @@ class RegressionRuntime:
     predict_seconds: float
     total_seconds: float
     parameter_count: int
+    stage_benchmarks: RegressionStageBenchmarks | None = None
+
+
+@dataclass(slots=True)
+class StepBenchmarkConfig:
+    repetitions: int = 5
+    warmup_steps: int = 2
+    timed_steps: int = 10
+
+
+@dataclass(slots=True)
+class StageBenchmarkResult:
+    benchmark_device: str
+    precision: str | int
+    batch_size: int
+    repetitions: int
+    warmup_steps: int
+    timed_steps: int
+    mean_step_ms: float
+    std_step_ms: float
+    min_step_ms: float
+    max_step_ms: float
+    samples_per_second: float
+    peak_memory_mb: float | None
+
+
+@dataclass(slots=True)
+class RegressionStageBenchmarks:
+    fit: StageBenchmarkResult | None = None
+    test: StageBenchmarkResult | None = None
+    predict: StageBenchmarkResult | None = None
 
 
 @dataclass(slots=True)
@@ -325,12 +362,278 @@ def _synchronize_if_cuda_available() -> None:
         torch.cuda.synchronize()
 
 
+def _synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def _count_model_parameters(model: nn.Module) -> int:
     total = sum(parameter.numel() for parameter in model.parameters())
     extra_parameter_count = getattr(model, "extra_parameter_count", None)
     if callable(extra_parameter_count):
         total += int(extra_parameter_count())
     return total
+
+
+def _resolve_benchmark_device(device_name: str) -> torch.device:
+    return torch.device(device_name)
+
+
+def _autocast_dtype(
+    precision: str | int,
+    device: torch.device,
+) -> torch.dtype | None:
+    if device.type != "cuda":
+        return None
+    normalized = str(precision)
+    if normalized in {"bf16", "bf16-mixed", "bf16-true"}:
+        return torch.bfloat16
+    if normalized in {"16", "16-mixed", "16-true"}:
+        return torch.float16
+    return None
+
+
+def _precision_context(
+    precision: str | int,
+    device: torch.device,
+):
+    autocast_dtype = _autocast_dtype(precision, device)
+    if autocast_dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=autocast_dtype)
+
+
+def _uses_fp16_grad_scaler(precision: str | int, device: torch.device) -> bool:
+    return device.type == "cuda" and str(precision) in {"16", "16-mixed"}
+
+
+def _apply_model_post_step_hooks(model: nn.Module) -> None:
+    clip_weights = getattr(model, "clip_weights_", None)
+    if callable(clip_weights):
+        clip_weights()
+    apply_discrete_updates = getattr(model, "apply_discrete_updates_", None)
+    if callable(apply_discrete_updates):
+        apply_discrete_updates()
+
+
+def _prepare_model_for_evaluation(model: nn.Module) -> None:
+    prepare_for_evaluation = getattr(model, "prepare_for_evaluation_", None)
+    if callable(prepare_for_evaluation):
+        prepare_for_evaluation()
+
+
+def _prepare_model_for_fit_stage_benchmark(model: nn.Module) -> None:
+    for module in model.modules():
+        prepare_for_fit_stage_benchmark = getattr(
+            module,
+            "prepare_for_fit_stage_benchmark_",
+            None,
+        )
+        if callable(prepare_for_fit_stage_benchmark):
+            prepare_for_fit_stage_benchmark()
+
+
+def _fit_stage_benchmark_config_for_model(
+    model: nn.Module,
+    config: StepBenchmarkConfig,
+) -> StepBenchmarkConfig:
+    cycle_lengths: list[int] = []
+    for module in model.modules():
+        fit_stage_benchmark_cycle_length = getattr(
+            module,
+            "fit_stage_benchmark_cycle_length",
+            None,
+        )
+        if not callable(fit_stage_benchmark_cycle_length):
+            continue
+        cycle_length = int(fit_stage_benchmark_cycle_length())
+        if cycle_length > 1:
+            cycle_lengths.append(cycle_length)
+    if not cycle_lengths:
+        return config
+
+    cycle_length = max(cycle_lengths)
+    timed_steps = max(config.timed_steps, cycle_length * 2)
+    remainder = timed_steps % cycle_length
+    if remainder != 0:
+        timed_steps += cycle_length - remainder
+    if timed_steps == config.timed_steps:
+        return config
+    return replace(config, timed_steps=timed_steps)
+
+
+def _clone_model_for_stage_benchmark(
+    run_result: RegressionRunResult,
+    device: torch.device,
+) -> nn.Module:
+    model = copy.deepcopy(run_result.model.model)
+    model.to(device)
+    return model
+
+
+def _move_batch_to_device(
+    batch: Batch,
+    device: torch.device,
+) -> Batch:
+    features, targets = batch
+    return (
+        features.to(device=device, non_blocking=True),
+        targets.to(device=device, non_blocking=True),
+    )
+
+
+def _benchmark_step_runner(
+    *,
+    benchmark_device: torch.device,
+    precision: str | int,
+    batch_size: int,
+    config: StepBenchmarkConfig,
+    step_factory: Callable[[], Callable[[], None]],
+) -> StageBenchmarkResult:
+    if config.repetitions < 1:
+        raise ValueError("Step benchmark repetitions must be at least 1.")
+    if config.timed_steps < 1:
+        raise ValueError("Step benchmark timed_steps must be at least 1.")
+
+    step_times_ms: list[float] = []
+    peak_memory_mb: float | None = None
+    for _ in range(config.repetitions):
+        step = step_factory()
+        for _ in range(config.warmup_steps):
+            step()
+        _synchronize_device(benchmark_device)
+        if benchmark_device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(benchmark_device)
+        start = time.perf_counter()
+        for _ in range(config.timed_steps):
+            step()
+        _synchronize_device(benchmark_device)
+        step_time_ms = (time.perf_counter() - start) * 1000.0 / config.timed_steps
+        step_times_ms.append(step_time_ms)
+        if benchmark_device.type == "cuda":
+            peak_memory_mb = max(
+                peak_memory_mb or 0.0,
+                float(torch.cuda.max_memory_allocated(benchmark_device))
+                / (1024.0 * 1024.0),
+            )
+
+    mean_step_ms = float(np.mean(step_times_ms))
+    std_step_ms = float(np.std(step_times_ms))
+    return StageBenchmarkResult(
+        benchmark_device=str(benchmark_device),
+        precision=precision,
+        batch_size=batch_size,
+        repetitions=config.repetitions,
+        warmup_steps=config.warmup_steps,
+        timed_steps=config.timed_steps,
+        mean_step_ms=mean_step_ms,
+        std_step_ms=std_step_ms,
+        min_step_ms=float(np.min(step_times_ms)),
+        max_step_ms=float(np.max(step_times_ms)),
+        samples_per_second=(batch_size * 1000.0 / mean_step_ms),
+        peak_memory_mb=peak_memory_mb,
+    )
+
+
+def benchmark_regression_run_result_stages(
+    run_result: RegressionRunResult,
+    benchmark_config: StepBenchmarkConfig,
+) -> RegressionStageBenchmarks:
+    benchmark_device = _resolve_benchmark_device(run_result.device)
+    bundle = create_regression_dataloaders(run_result.data_config)
+    train_batch = _move_batch_to_device(next(iter(bundle.train_loader)), benchmark_device)
+    test_batch = _move_batch_to_device(next(iter(bundle.test_loader)), benchmark_device)
+    precision = run_result.training_config.precision
+    fit_benchmark_config = _fit_stage_benchmark_config_for_model(
+        run_result.model.model,
+        benchmark_config,
+    )
+
+    train_batch_size = int(train_batch[0].shape[0])
+    test_batch_size = int(test_batch[0].shape[0])
+
+    def build_fit_step() -> Callable[[], None]:
+        model = _clone_model_for_stage_benchmark(run_result, benchmark_device)
+        model.train()
+        _prepare_model_for_fit_stage_benchmark(model)
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=run_result.training_config.learning_rate,
+            weight_decay=run_result.training_config.weight_decay,
+        )
+        scaler = (
+            torch.cuda.amp.GradScaler()
+            if _uses_fp16_grad_scaler(precision, benchmark_device)
+            else None
+        )
+        loss_fn = nn.MSELoss()
+        features, targets = train_batch
+
+        def step() -> None:
+            optimizer.zero_grad(set_to_none=True)
+            with _precision_context(precision, benchmark_device):
+                predictions = model(features)
+                loss = loss_fn(predictions, targets)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+            _apply_model_post_step_hooks(model)
+
+        return step
+
+    def build_test_step() -> Callable[[], None]:
+        model = _clone_model_for_stage_benchmark(run_result, benchmark_device)
+        model.eval()
+        loss_fn = nn.MSELoss()
+        features, targets = test_batch
+
+        def step() -> None:
+            with torch.no_grad():
+                with _precision_context(precision, benchmark_device):
+                    predictions = model(features)
+                    loss_fn(predictions, targets)
+
+        return step
+
+    def build_predict_step() -> Callable[[], None]:
+        model = _clone_model_for_stage_benchmark(run_result, benchmark_device)
+        model.eval()
+        features, _ = test_batch
+
+        def step() -> None:
+            with torch.no_grad():
+                with _precision_context(precision, benchmark_device):
+                    model(features)
+
+        return step
+
+    return RegressionStageBenchmarks(
+        fit=_benchmark_step_runner(
+            benchmark_device=benchmark_device,
+            precision=precision,
+            batch_size=train_batch_size,
+            config=fit_benchmark_config,
+            step_factory=build_fit_step,
+        ),
+        test=_benchmark_step_runner(
+            benchmark_device=benchmark_device,
+            precision=precision,
+            batch_size=test_batch_size,
+            config=benchmark_config,
+            step_factory=build_test_step,
+        ),
+        predict=_benchmark_step_runner(
+            benchmark_device=benchmark_device,
+            precision=precision,
+            batch_size=test_batch_size,
+            config=benchmark_config,
+            step_factory=build_predict_step,
+        ),
+    )
 
 
 def train_regression_model(
@@ -385,6 +688,7 @@ def train_regression_model(
         fit_seconds = time.perf_counter() - fit_start
 
         best_model = load_best_model_weights(lightning_model, checkpoint_callback)
+        _prepare_model_for_evaluation(best_model.model)
 
         _synchronize_if_cuda_available()
         test_start = time.perf_counter()

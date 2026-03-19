@@ -12,7 +12,13 @@ import torch
 
 from output_paths import ARTIFACTS_DIRNAME, resolve_output_path
 from regression_data import RegressionDataConfig
-from regression_experiment import RegressionRunResult, TrainingConfig
+from regression_experiment import (
+    RegressionRunResult,
+    StageBenchmarkResult,
+    StepBenchmarkConfig,
+    TrainingConfig,
+    benchmark_regression_run_result_stages,
+)
 from regression_models import ShadowFreeTernaryLinear, TernaryLinear
 from run_regression_baseline import train_regression_baseline
 from run_regression_comparison import regression_run_result_to_dict
@@ -40,6 +46,18 @@ def cpu_inference_record_to_dict(record: CpuInferenceRecord) -> dict[str, object
 
 
 def _parse_hidden_dims(spec: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in spec.split(",") if part.strip())
+
+
+def _parse_control_ranks(spec: str | None) -> tuple[int, ...] | None:
+    if spec is None:
+        return None
+    return tuple(int(part) for part in spec.split(",") if part.strip())
+
+
+def _parse_refresh_intervals(spec: str | None) -> tuple[int, ...] | None:
+    if spec is None:
+        return None
     return tuple(int(part) for part in spec.split(",") if part.strip())
 
 
@@ -172,13 +190,93 @@ def _write_cpu_inference_csv(
         writer.writerows(serialized)
 
 
+def _run_result_uses_cuda(run_result: RegressionRunResult) -> bool:
+    return torch.device(run_result.device).type == "cuda"
+
+
+def _stage_benchmark_comparison_record(
+    dense_stage: StageBenchmarkResult,
+    ternary_stage: StageBenchmarkResult,
+) -> dict[str, object]:
+    dense_peak = dense_stage.peak_memory_mb
+    ternary_peak = ternary_stage.peak_memory_mb
+    return {
+        "dense_mean_step_ms": dense_stage.mean_step_ms,
+        "dense_std_step_ms": dense_stage.std_step_ms,
+        "dense_samples_per_second": dense_stage.samples_per_second,
+        "dense_peak_memory_mb": dense_peak,
+        "ternary_mean_step_ms": ternary_stage.mean_step_ms,
+        "ternary_std_step_ms": ternary_stage.std_step_ms,
+        "ternary_samples_per_second": ternary_stage.samples_per_second,
+        "ternary_peak_memory_mb": ternary_peak,
+        "ternary_speedup_vs_dense": (
+            dense_stage.mean_step_ms / ternary_stage.mean_step_ms
+            if ternary_stage.mean_step_ms > 0.0
+            else None
+        ),
+        "peak_memory_delta_mb": (
+            ternary_peak - dense_peak
+            if dense_peak is not None and ternary_peak is not None
+            else None
+        ),
+    }
+
+
+def _build_gpu_stage_benchmark_comparison(
+    dense_result: RegressionRunResult,
+    ternary_result: RegressionRunResult,
+) -> dict[str, object] | None:
+    dense_benchmarks = dense_result.runtime.stage_benchmarks
+    ternary_benchmarks = ternary_result.runtime.stage_benchmarks
+    if dense_benchmarks is None or ternary_benchmarks is None:
+        return None
+    if (
+        dense_benchmarks.fit is None
+        or dense_benchmarks.test is None
+        or dense_benchmarks.predict is None
+        or ternary_benchmarks.fit is None
+        or ternary_benchmarks.test is None
+        or ternary_benchmarks.predict is None
+    ):
+        return None
+    return {
+        "dense_device": dense_benchmarks.fit.benchmark_device,
+        "ternary_device": ternary_benchmarks.fit.benchmark_device,
+        "by_stage": {
+            "fit": _stage_benchmark_comparison_record(
+                dense_benchmarks.fit,
+                ternary_benchmarks.fit,
+            ),
+            "test": _stage_benchmark_comparison_record(
+                dense_benchmarks.test,
+                ternary_benchmarks.test,
+            ),
+            "predict": _stage_benchmark_comparison_record(
+                dense_benchmarks.predict,
+                ternary_benchmarks.predict,
+            ),
+        },
+    }
+
+
+def _format_peak_memory(memory_mb: float | None) -> str:
+    return "n/a" if memory_mb is None else f"{memory_mb:.1f}MB"
+
+
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Compare a dense BF16 baseline against a ternary research prototype."
     )
     parser.add_argument(
         "--model-family",
-        choices=("shadowfree", "ste", "hybrid", "projected"),
+        choices=(
+            "shadowfree",
+            "ste",
+            "hybrid",
+            "projected",
+            "refresh_projected",
+            "controlled_refresh_projected",
+        ),
         default="shadowfree",
         help="Which ternary research model to compare against the dense baseline.",
     )
@@ -226,6 +324,24 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cpu-benchmark-iterations", type=int, default=200)
     parser.add_argument("--cpu-benchmark-warmup", type=int, default=20)
+    parser.add_argument(
+        "--gpu-benchmark-repetitions",
+        type=int,
+        default=5,
+        help="Repeated per-stage GPU step measurements to collect for CUDA runs. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--gpu-benchmark-warmup-steps",
+        type=int,
+        default=2,
+        help="Warmup steps per repetition for the GPU stage benchmark.",
+    )
+    parser.add_argument(
+        "--gpu-benchmark-timed-steps",
+        type=int,
+        default=10,
+        help="Timed steps per repetition for the GPU stage benchmark.",
+    )
     parser.add_argument("--initial-density", type=float, default=0.25)
     parser.add_argument("--update-interval", type=int, default=1)
     parser.add_argument("--activation-std-multiplier", type=float, default=0.5)
@@ -258,6 +374,53 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=100000,
         help="Discrete-update interval for the projected family. Use a large value to freeze ternary state during recovery training.",
+    )
+    parser.add_argument(
+        "--refresh-interval",
+        type=int,
+        default=8,
+        help="Optimizer steps between cached-state refreshes for the refresh_projected families.",
+    )
+    parser.add_argument(
+        "--refresh-intervals",
+        type=str,
+        default=None,
+        help="Optional comma-separated per-layer refresh intervals for refresh_projected families. Must match the hidden layer count.",
+    )
+    parser.add_argument(
+        "--refresh-project-every-n-refreshes",
+        type=int,
+        default=1,
+        help="How often to reapply density projection when refreshing the cached ternary state.",
+    )
+    parser.add_argument(
+        "--control-rank",
+        type=int,
+        default=16,
+        help="Low-rank width for the dense control path in the controlled_refresh_projected family.",
+    )
+    parser.add_argument(
+        "--control-ranks",
+        type=str,
+        default=None,
+        help="Optional comma-separated per-layer control ranks for the controlled_refresh_projected family. Use 0 to disable control on a layer.",
+    )
+    parser.add_argument(
+        "--control-mode",
+        choices=("low_rank", "scalar_gate"),
+        default="low_rank",
+        help="Dense control mechanism for the controlled_refresh_projected family.",
+    )
+    parser.add_argument(
+        "--activation-threshold-scale",
+        type=float,
+        default=0.25,
+        help="Threshold scale for ternary hidden-activation quantization in the controlled_refresh_projected family.",
+    )
+    parser.add_argument(
+        "--disable-lowbit-activations",
+        action="store_true",
+        help="Keep hidden activations dense instead of ternary in the controlled_refresh_projected family.",
     )
     parser.add_argument(
         "--json-out",
@@ -311,7 +474,17 @@ def main() -> None:
         precision=dense_precision,
     )
     ternary_hidden_dims_spec = args.ternary_hidden_dims
-    if args.model_family in {"ste", "hybrid", "projected"} and ternary_hidden_dims_spec == "64":
+    if (
+        args.model_family
+        in {
+            "ste",
+            "hybrid",
+            "projected",
+            "refresh_projected",
+            "controlled_refresh_projected",
+        }
+        and ternary_hidden_dims_spec == "64"
+    ):
         ternary_hidden_dims_spec = "64,32"
 
     ternary_training_config = TrainingConfig(
@@ -392,7 +565,7 @@ def main() -> None:
                 hybrid_run.consolidation_result
             ),
         }
-    else:
+    elif args.model_family == "projected":
         warm_start_training_config = TrainingConfig(
             hidden_dims=ternary_training_config.hidden_dims,
             epochs=args.warm_start_epochs,
@@ -458,6 +631,174 @@ def main() -> None:
                 projected_run.consolidation_result
             ),
         }
+    elif args.model_family == "refresh_projected":
+        warm_start_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.warm_start_epochs,
+            learning_rate=args.ternary_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        consolidation_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.consolidation_epochs,
+            learning_rate=args.consolidation_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        refresh_run = train_hybrid_ternary_regression(
+            data_config=data_config,
+            warm_start_training_config=warm_start_training_config,
+            consolidation_training_config=consolidation_training_config,
+            use_input_shortcut=True,
+            threshold_scale=args.threshold_scale,
+            consolidation_variant="refresh_projected",
+            projection_target_density=args.projection_target_density,
+            projection_structure=(
+                None
+                if args.projection_structure == "none"
+                else args.projection_structure
+            ),
+            projection_block_size=(
+                None
+                if args.projection_structure == "none"
+                else args.projection_block_size
+            ),
+            refresh_interval=args.refresh_interval,
+            refresh_intervals=_parse_refresh_intervals(args.refresh_intervals),
+            refresh_project_every_n_refreshes=args.refresh_project_every_n_refreshes,
+        )
+        ternary_result = refresh_run.final_result
+        ternary_model_name = "refresh_projected_ternary"
+        ternary_training_config = consolidation_training_config
+        family_details_key = "refresh_projection_details"
+        family_details = {
+            "projection_target_density": args.projection_target_density,
+            "projection_structure": (
+                None
+                if args.projection_structure == "none"
+                else args.projection_structure
+            ),
+            "projection_block_size": (
+                None
+                if args.projection_structure == "none"
+                else args.projection_block_size
+            ),
+            "refresh_interval": args.refresh_interval,
+            "refresh_intervals": _parse_refresh_intervals(args.refresh_intervals),
+            "refresh_project_every_n_refreshes": (
+                args.refresh_project_every_n_refreshes
+            ),
+            "warm_start_training_config": asdict(warm_start_training_config),
+            "consolidation_training_config": asdict(consolidation_training_config),
+            "warm_start_result": regression_run_result_to_dict(
+                refresh_run.warm_start_result
+            ),
+            "consolidation_result": regression_run_result_to_dict(
+                refresh_run.consolidation_result
+            ),
+        }
+    else:
+        warm_start_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.warm_start_epochs,
+            learning_rate=args.ternary_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        consolidation_training_config = TrainingConfig(
+            hidden_dims=ternary_training_config.hidden_dims,
+            epochs=args.consolidation_epochs,
+            learning_rate=args.consolidation_learning_rate,
+            seed=args.seed,
+            accelerator=ternary_accelerator,
+            precision=ternary_precision,
+        )
+        controlled_refresh_run = train_hybrid_ternary_regression(
+            data_config=data_config,
+            warm_start_training_config=warm_start_training_config,
+            consolidation_training_config=consolidation_training_config,
+            use_input_shortcut=True,
+            threshold_scale=args.threshold_scale,
+            consolidation_variant="controlled_refresh_projected",
+            projection_target_density=args.projection_target_density,
+            projection_structure=(
+                None
+                if args.projection_structure == "none"
+                else args.projection_structure
+            ),
+            projection_block_size=(
+                None
+                if args.projection_structure == "none"
+                else args.projection_block_size
+            ),
+            refresh_interval=args.refresh_interval,
+            refresh_intervals=_parse_refresh_intervals(args.refresh_intervals),
+            refresh_project_every_n_refreshes=args.refresh_project_every_n_refreshes,
+            control_rank=args.control_rank,
+            control_ranks=_parse_control_ranks(args.control_ranks),
+            control_mode=args.control_mode,
+            activation_threshold_scale=args.activation_threshold_scale,
+            quantize_hidden_activations=not args.disable_lowbit_activations,
+        )
+        ternary_result = controlled_refresh_run.final_result
+        ternary_model_name = "controlled_refresh_projected_ternary"
+        ternary_training_config = consolidation_training_config
+        family_details_key = "controlled_refresh_projection_details"
+        family_details = {
+            "projection_target_density": args.projection_target_density,
+            "projection_structure": (
+                None
+                if args.projection_structure == "none"
+                else args.projection_structure
+            ),
+            "projection_block_size": (
+                None
+                if args.projection_structure == "none"
+                else args.projection_block_size
+            ),
+            "refresh_interval": args.refresh_interval,
+            "refresh_intervals": _parse_refresh_intervals(args.refresh_intervals),
+            "refresh_project_every_n_refreshes": (
+                args.refresh_project_every_n_refreshes
+            ),
+            "control_rank": args.control_rank,
+            "control_ranks": _parse_control_ranks(args.control_ranks),
+            "control_mode": args.control_mode,
+            "activation_threshold_scale": args.activation_threshold_scale,
+            "quantize_hidden_activations": not args.disable_lowbit_activations,
+            "warm_start_training_config": asdict(warm_start_training_config),
+            "consolidation_training_config": asdict(consolidation_training_config),
+            "warm_start_result": regression_run_result_to_dict(
+                controlled_refresh_run.warm_start_result
+            ),
+            "consolidation_result": regression_run_result_to_dict(
+                controlled_refresh_run.consolidation_result
+            ),
+        }
+
+    gpu_benchmark_config = None
+    if args.gpu_benchmark_repetitions > 0:
+        gpu_benchmark_config = StepBenchmarkConfig(
+            repetitions=args.gpu_benchmark_repetitions,
+            warmup_steps=args.gpu_benchmark_warmup_steps,
+            timed_steps=args.gpu_benchmark_timed_steps,
+        )
+        if _run_result_uses_cuda(dense_result):
+            dense_result.runtime.stage_benchmarks = benchmark_regression_run_result_stages(
+                dense_result,
+                gpu_benchmark_config,
+            )
+        if _run_result_uses_cuda(ternary_result):
+            ternary_result.runtime.stage_benchmarks = (
+                benchmark_regression_run_result_stages(
+                    ternary_result,
+                    gpu_benchmark_config,
+                )
+            )
 
     cpu_records = benchmark_model_on_cpu(
         dense_result,
@@ -493,6 +834,14 @@ def main() -> None:
         ],
         "best_sparse_speedup_vs_dense_by_batch": best_sparse_speedup,
     }
+    gpu_stage_benchmark_comparison = _build_gpu_stage_benchmark_comparison(
+        dense_result,
+        ternary_result,
+    )
+    if gpu_benchmark_config is not None:
+        result["gpu_stage_benchmark_config"] = asdict(gpu_benchmark_config)
+    if gpu_stage_benchmark_comparison is not None:
+        result["gpu_stage_benchmark_comparison"] = gpu_stage_benchmark_comparison
     if family_details_key is not None and family_details is not None:
         result[family_details_key] = family_details
 
@@ -519,6 +868,16 @@ def main() -> None:
         f"  precision={ternary_precision} accelerator={ternary_accelerator} rmse={ternary_result.test_metrics.rmse:.4f} "
         f"total={ternary_result.runtime.total_seconds:.4f}s density={_ternary_nonzero_density(ternary_result.model.model)}"
     )
+    if gpu_stage_benchmark_comparison is not None:
+        print("GPU stage benchmark comparison")
+        for stage_name, comparison in gpu_stage_benchmark_comparison["by_stage"].items():
+            print(
+                f"  {stage_name}: dense={comparison['dense_mean_step_ms']:.3f}ms "
+                f"ternary={comparison['ternary_mean_step_ms']:.3f}ms "
+                f"speedup={comparison['ternary_speedup_vs_dense']:.3f}x "
+                f"dense_peak={_format_peak_memory(comparison['dense_peak_memory_mb'])} "
+                f"ternary_peak={_format_peak_memory(comparison['ternary_peak_memory_mb'])}"
+            )
     print("CPU inference benchmark")
     for record in cpu_records:
         print(

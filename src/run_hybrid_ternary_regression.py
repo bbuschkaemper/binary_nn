@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from regression_data import RegressionDataConfig
@@ -10,7 +11,11 @@ from regression_experiment import (
     TrainingConfig,
     train_regression_model,
 )
-from regression_models import ShadowFreeTernaryRegressor
+from regression_models import (
+    ControlledRefreshProjectedTernaryRegressor,
+    RefreshScheduledProjectedTernaryRegressor,
+    ShadowFreeTernaryRegressor,
+)
 from run_ternary_regression import (
     DEFAULT_TERNARY_HIDDEN_DIMS,
     DEFAULT_TERNARY_LEARNING_RATE,
@@ -21,6 +26,18 @@ from run_ternary_regression import (
 DEFAULT_HYBRID_WARM_START_EPOCHS = 50
 DEFAULT_HYBRID_CONSOLIDATION_EPOCHS = 25
 DEFAULT_HYBRID_CONSOLIDATION_LEARNING_RATE = 1e-3
+
+
+def _parse_control_ranks(spec: str | None) -> tuple[int, ...] | None:
+    if spec is None:
+        return None
+    return tuple(int(part) for part in spec.split(",") if part.strip())
+
+
+def _parse_refresh_intervals(spec: str | None) -> tuple[int, ...] | None:
+    if spec is None:
+        return None
+    return tuple(int(part) for part in spec.split(",") if part.strip())
 
 
 @dataclass(slots=True)
@@ -46,6 +63,7 @@ def _combine_hybrid_runtime(
         predict_seconds=predict_seconds,
         total_seconds=fit_seconds + test_seconds + predict_seconds,
         parameter_count=consolidation_result.runtime.parameter_count,
+        stage_benchmarks=consolidation_result.runtime.stage_benchmarks,
     )
 
 
@@ -73,11 +91,20 @@ def train_hybrid_ternary_regression(
     *,
     use_input_shortcut: bool = True,
     threshold_scale: float = 0.5,
+    consolidation_variant: str = "shadowfree",
     projection_target_density: float | None = None,
     projection_structure: str | None = None,
     projection_block_size: int | None = None,
     initial_density: float = 0.25,
     update_interval: int = 4,
+    refresh_interval: int = 8,
+    refresh_intervals: Sequence[int] | None = None,
+    refresh_project_every_n_refreshes: int = 1,
+    control_rank: int = 16,
+    control_ranks: Sequence[int] | None = None,
+    control_mode: str = "low_rank",
+    activation_threshold_scale: float = 0.25,
+    quantize_hidden_activations: bool = True,
     activation_std_multiplier: float = 1.0,
     prune_ratio: float = 0.25,
     flip_multiplier: float = 2.0,
@@ -107,17 +134,47 @@ def train_hybrid_ternary_regression(
         use_input_shortcut=use_input_shortcut,
         threshold_scale=threshold_scale,
     )
-    hybrid_model = ShadowFreeTernaryRegressor.from_ste_regressor(
-        warm_start_result.model.model,
-        target_density=projection_target_density,
-        projection_structure=projection_structure,
-        projection_block_size=projection_block_size,
-        initial_density=initial_density,
-        update_interval=update_interval,
-        activation_std_multiplier=activation_std_multiplier,
-        prune_ratio=prune_ratio,
-        flip_multiplier=flip_multiplier,
-    )
+    if consolidation_variant == "shadowfree":
+        hybrid_model = ShadowFreeTernaryRegressor.from_ste_regressor(
+            warm_start_result.model.model,
+            target_density=projection_target_density,
+            projection_structure=projection_structure,
+            projection_block_size=projection_block_size,
+            initial_density=initial_density,
+            update_interval=update_interval,
+            activation_std_multiplier=activation_std_multiplier,
+            prune_ratio=prune_ratio,
+            flip_multiplier=flip_multiplier,
+        )
+    elif consolidation_variant == "refresh_projected":
+        hybrid_model = RefreshScheduledProjectedTernaryRegressor.from_ste_regressor(
+            warm_start_result.model.model,
+            target_density=projection_target_density,
+            projection_structure=projection_structure,
+            projection_block_size=projection_block_size,
+            refresh_interval=refresh_interval,
+            refresh_intervals=refresh_intervals,
+            refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+        )
+    elif consolidation_variant == "controlled_refresh_projected":
+        hybrid_model = ControlledRefreshProjectedTernaryRegressor.from_ste_regressor(
+            warm_start_result.model.model,
+            target_density=projection_target_density,
+            projection_structure=projection_structure,
+            projection_block_size=projection_block_size,
+            refresh_interval=refresh_interval,
+            refresh_intervals=refresh_intervals,
+            refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+            control_rank=control_rank,
+            control_ranks=control_ranks,
+            control_mode=control_mode,
+            activation_threshold_scale=activation_threshold_scale,
+            quantize_hidden_activations=quantize_hidden_activations,
+        )
+    else:
+        raise ValueError(
+            "consolidation_variant must be 'shadowfree', 'refresh_projected', or 'controlled_refresh_projected'."
+        )
     consolidation_result = train_regression_model(
         model=hybrid_model,
         data_config=data_config,
@@ -181,6 +238,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--threshold-scale", type=float, default=0.5)
     parser.add_argument(
+        "--consolidation-variant",
+        choices=("shadowfree", "refresh_projected", "controlled_refresh_projected"),
+        default="shadowfree",
+        help="Which low-bit consolidation model to use after the STE warm start.",
+    )
+    parser.add_argument(
         "--projection-target-density",
         type=float,
         default=None,
@@ -200,6 +263,43 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--initial-density", type=float, default=0.25)
     parser.add_argument("--update-interval", type=int, default=4)
+    parser.add_argument("--refresh-interval", type=int, default=8)
+    parser.add_argument(
+        "--refresh-intervals",
+        type=str,
+        default=None,
+        help="Optional comma-separated per-layer refresh intervals for refresh_projected variants. Must match the hidden layer count.",
+    )
+    parser.add_argument("--refresh-project-every-n-refreshes", type=int, default=1)
+    parser.add_argument(
+        "--control-rank",
+        type=int,
+        default=16,
+        help="Low-rank width for the dense control path in the controlled_refresh_projected variant.",
+    )
+    parser.add_argument(
+        "--control-ranks",
+        type=str,
+        default=None,
+        help="Optional comma-separated per-layer control ranks for the controlled_refresh_projected variant. Use 0 to disable control on a layer.",
+    )
+    parser.add_argument(
+        "--control-mode",
+        choices=("low_rank", "scalar_gate"),
+        default="low_rank",
+        help="Dense control mechanism for the controlled_refresh_projected variant.",
+    )
+    parser.add_argument(
+        "--activation-threshold-scale",
+        type=float,
+        default=0.25,
+        help="Threshold scale for ternary hidden-activation quantization in the controlled_refresh_projected variant.",
+    )
+    parser.add_argument(
+        "--disable-lowbit-activations",
+        action="store_true",
+        help="Keep hidden activations in BF16/FP32 instead of ternary in the controlled_refresh_projected variant.",
+    )
     parser.add_argument("--activation-std-multiplier", type=float, default=1.0)
     parser.add_argument("--prune-ratio", type=float, default=0.25)
     parser.add_argument("--flip-multiplier", type=float, default=2.0)
@@ -256,6 +356,7 @@ def main() -> None:
         warm_start_training_config=warm_start_training_config,
         consolidation_training_config=consolidation_training_config,
         threshold_scale=args.threshold_scale,
+        consolidation_variant=args.consolidation_variant,
         projection_target_density=args.projection_target_density,
         projection_structure=(
             None if args.projection_structure == "none" else args.projection_structure
@@ -265,6 +366,14 @@ def main() -> None:
         ),
         initial_density=args.initial_density,
         update_interval=args.update_interval,
+        refresh_interval=args.refresh_interval,
+        refresh_intervals=_parse_refresh_intervals(args.refresh_intervals),
+        refresh_project_every_n_refreshes=args.refresh_project_every_n_refreshes,
+        control_rank=args.control_rank,
+        control_ranks=_parse_control_ranks(args.control_ranks),
+        control_mode=args.control_mode,
+        activation_threshold_scale=args.activation_threshold_scale,
+        quantize_hidden_activations=not args.disable_lowbit_activations,
         activation_std_multiplier=args.activation_std_multiplier,
         prune_ratio=args.prune_ratio,
         flip_multiplier=args.flip_multiplier,

@@ -500,6 +500,267 @@ class TernaryLinear(nn.Module):
         return F.linear(inputs, quantized_weight * self._scale(), self.bias)
 
 
+class RefreshScheduledProjectedTernaryLinear(TernaryLinear):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        *,
+        threshold_scale: float = 0.75,
+        refresh_interval: int = 4,
+        refresh_project_every_n_refreshes: int = 1,
+        refresh_target_density: float | None = None,
+        refresh_projection_structure: str | None = None,
+        refresh_projection_block_size: int | None = None,
+        use_cpu_sparse_inference: bool = True,
+        sparse_inference_density_threshold: float = PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD,
+        use_cpu_index_inference: bool = False,
+        index_inference_min_density: float = 0.15,
+        index_inference_density_threshold: float = 0.5,
+        index_inference_min_batch_size: int = 128,
+        index_inference_output_block_size: int = 64,
+    ) -> None:
+        if refresh_interval <= 0:
+            raise ValueError("refresh_interval must be positive.")
+        if refresh_project_every_n_refreshes <= 0:
+            raise ValueError("refresh_project_every_n_refreshes must be positive.")
+
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            threshold_scale=threshold_scale,
+            use_cpu_sparse_inference=use_cpu_sparse_inference,
+            sparse_inference_density_threshold=sparse_inference_density_threshold,
+            use_cpu_index_inference=use_cpu_index_inference,
+            index_inference_min_density=index_inference_min_density,
+            index_inference_density_threshold=index_inference_density_threshold,
+            index_inference_min_batch_size=index_inference_min_batch_size,
+            index_inference_output_block_size=index_inference_output_block_size,
+        )
+        self.refresh_interval = refresh_interval
+        self.refresh_project_every_n_refreshes = refresh_project_every_n_refreshes
+        self.refresh_target_density = refresh_target_density
+        self.refresh_projection_structure = refresh_projection_structure
+        self.refresh_projection_block_size = refresh_projection_block_size
+        self.register_buffer(
+            "_refresh_weight_state",
+            torch.zeros(out_features, in_features, dtype=torch.int8),
+        )
+        self.register_buffer(
+            "_refresh_scale",
+            torch.ones(out_features, 1, dtype=torch.float32),
+        )
+        self._steps_since_refresh = 0
+        self._refresh_count = 0
+        self._refresh_state_version = 0
+        self.refresh_cached_state_(force_project=True)
+
+    def _invalidate_refresh_caches(self) -> None:
+        self._cached_sparse_weight = None
+        self._cached_weight_version = -1
+        self._cached_weight_device = None
+        self._cached_dense_weight = None
+        self._cached_dense_weight_version = -1
+        self._cached_dense_weight_device = None
+        self._cached_indexed_weight = None
+        self._cached_indexed_weight_version = -1
+        self._cached_indexed_weight_device = None
+
+    def _should_project_on_refresh(self, force_project: bool | None) -> bool:
+        if self.refresh_target_density is None:
+            return False
+        if force_project is not None:
+            return force_project
+        return self._refresh_count % self.refresh_project_every_n_refreshes == 0
+
+    def _project_quantized_weight_for_refresh(
+        self,
+        quantized_weight: torch.Tensor,
+        *,
+        force_project: bool | None,
+    ) -> torch.Tensor:
+        if not self._should_project_on_refresh(force_project):
+            return quantized_weight
+        assert self.refresh_target_density is not None
+        if self.refresh_projection_structure is None:
+            return self._prune_quantized_weight_to_density(
+                quantized_weight,
+                self.refresh_target_density,
+            )
+        if self.refresh_projection_structure == "row_block":
+            if self.refresh_projection_block_size is None:
+                raise ValueError(
+                    "refresh_projection_block_size is required for row_block projection."
+                )
+            return self._prune_quantized_weight_to_row_block_density(
+                quantized_weight,
+                self.refresh_target_density,
+                self.refresh_projection_block_size,
+            )
+        raise ValueError(
+            f"Unsupported refresh_projection_structure: {self.refresh_projection_structure!r}"
+        )
+
+    @torch.no_grad()
+    def refresh_cached_state_(self, *, force_project: bool | None = None) -> None:
+        quantized_weight = self.quantized_weight().detach().to(torch.int8)
+        quantized_weight = self._project_quantized_weight_for_refresh(
+            quantized_weight,
+            force_project=force_project,
+        )
+        scale = self._scale().detach().to(torch.float32)
+        self._refresh_weight_state.copy_(quantized_weight)
+        self._refresh_scale.copy_(scale)
+        self._steps_since_refresh = 0
+        self._refresh_count += 1
+        self._refresh_state_version += 1
+        self._invalidate_refresh_caches()
+
+    @torch.no_grad()
+    def apply_discrete_updates_(self) -> None:
+        self._steps_since_refresh += 1
+        if self._steps_since_refresh < self.refresh_interval:
+            return
+        self.refresh_cached_state_()
+
+    @torch.no_grad()
+    def prepare_for_evaluation_(self) -> None:
+        self.refresh_cached_state_(force_project=True)
+
+    @torch.no_grad()
+    def prepare_for_fit_stage_benchmark_(self) -> None:
+        self.refresh_cached_state_()
+
+    def fit_stage_benchmark_cycle_length(self) -> int:
+        return self.refresh_interval
+
+    def nonzero_density(self) -> float:
+        return float((self._refresh_weight_state != 0).float().mean().item())
+
+    def extra_parameter_count(self) -> int:
+        return int(self._refresh_weight_state.numel())
+
+    def _refresh_indexed_weight_cache(self) -> None:
+        self._cached_indexed_weight = pack_ternary_weight(
+            self._refresh_weight_state.to(torch.int8),
+            self._refresh_scale.detach().squeeze(1),
+        )
+        self._cached_indexed_weight_version = self._refresh_state_version
+        self._cached_indexed_weight_device = self.weight.device
+
+    def _get_indexed_weight(self) -> IndexedTernaryWeight:
+        if (
+            self._cached_indexed_weight is None
+            or self._cached_indexed_weight_version != self._refresh_state_version
+            or self._cached_indexed_weight_device != self.weight.device
+        ):
+            self._refresh_indexed_weight_cache()
+        assert self._cached_indexed_weight is not None
+        return self._cached_indexed_weight
+
+    def _refresh_dense_weight_cache(self) -> None:
+        self._cached_dense_weight = (
+            self._refresh_weight_state.to(torch.float32) * self._refresh_scale
+        ).contiguous()
+        self._cached_dense_weight_version = self._refresh_state_version
+        self._cached_dense_weight_device = self.weight.device
+
+    def _get_dense_weight(self) -> torch.Tensor:
+        if (
+            self._cached_dense_weight is None
+            or self._cached_dense_weight_version != self._refresh_state_version
+            or self._cached_dense_weight_device != self.weight.device
+        ):
+            self._refresh_dense_weight_cache()
+        assert self._cached_dense_weight is not None
+        return self._cached_dense_weight
+
+    def _refresh_sparse_weight_cache(self) -> None:
+        effective_weight = self._get_dense_weight()
+        row_indices, col_indices = torch.nonzero(effective_weight, as_tuple=True)
+        if row_indices.numel() == 0:
+            crow_indices = torch.zeros(
+                self.out_features + 1,
+                device=effective_weight.device,
+                dtype=torch.int64,
+            )
+            column_indices = torch.zeros(
+                (0,),
+                device=effective_weight.device,
+                dtype=torch.int64,
+            )
+            values = torch.zeros(
+                (0,),
+                device=effective_weight.device,
+                dtype=torch.float32,
+            )
+        else:
+            row_counts = torch.bincount(row_indices, minlength=self.out_features)
+            crow_indices = torch.zeros(
+                self.out_features + 1,
+                device=effective_weight.device,
+                dtype=torch.int64,
+            )
+            crow_indices[1:] = torch.cumsum(row_counts, dim=0)
+            column_indices = col_indices.to(torch.int64)
+            values = effective_weight[row_indices, col_indices]
+        self._cached_sparse_weight = torch.sparse_csr_tensor(
+            crow_indices,
+            column_indices,
+            values,
+            size=effective_weight.shape,
+            device=effective_weight.device,
+        )
+        self._cached_weight_version = self._refresh_state_version
+        self._cached_weight_device = self.weight.device
+
+    def _get_sparse_weight(self) -> torch.Tensor:
+        if (
+            self._cached_sparse_weight is None
+            or self._cached_weight_version != self._refresh_state_version
+            or self._cached_weight_device != self.weight.device
+        ):
+            self._refresh_sparse_weight_cache()
+        assert self._cached_sparse_weight is not None
+        return self._cached_sparse_weight
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self._should_use_index_inference(inputs):
+            outputs = indexed_ternary_linear_cpu(
+                inputs,
+                self._get_indexed_weight(),
+                self.bias,
+                output_block_size=self.index_inference_output_block_size,
+            )
+            return outputs.to(inputs.dtype)
+
+        if self._should_use_sparse_inference(inputs):
+            sparse_weight = self._get_sparse_weight()
+            outputs = torch.sparse.mm(
+                sparse_weight,
+                inputs.to(torch.float32).transpose(0, 1),
+            ).transpose(0, 1)
+            if self.bias is not None:
+                outputs = outputs + self.bias.to(outputs.dtype)
+            return outputs.to(inputs.dtype)
+
+        cached_effective_weight = self._get_dense_weight().to(
+            device=inputs.device,
+            dtype=inputs.dtype,
+        )
+        if self.training and torch.is_grad_enabled():
+            surrogate_weight = self.weight.to(device=inputs.device, dtype=inputs.dtype)
+            # Keep the forward path on the cached ternary state while gradients flow
+            # through the latent weight that will drive the next refresh.
+            effective_weight = surrogate_weight + (
+                cached_effective_weight - surrogate_weight
+            ).detach()
+            return F.linear(inputs, effective_weight, self.bias)
+        return F.linear(inputs, cached_effective_weight, self.bias)
+
+
 def _inverse_softplus(value: float) -> float:
     if value <= 0.0:
         raise ValueError("Softplus inverse requires a positive value.")
@@ -913,6 +1174,51 @@ def build_ternary_mlp(
     return nn.Sequential(*layers)
 
 
+def build_refresh_scheduled_projected_ternary_mlp(
+    input_dim: int,
+    hidden_dims: Sequence[int],
+    output_dim: int = 1,
+    *,
+    threshold_scale: float = 0.75,
+    refresh_interval: int = 4,
+    refresh_intervals: Sequence[int] | None = None,
+    refresh_project_every_n_refreshes: int = 1,
+    refresh_target_density: float | None = None,
+    refresh_projection_structure: str | None = None,
+    refresh_projection_block_size: int | None = None,
+) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    previous_dim = input_dim
+    resolved_refresh_intervals = _resolve_refresh_intervals(
+        hidden_dims,
+        refresh_interval,
+        refresh_intervals,
+    )
+
+    for hidden_dim, layer_refresh_interval in zip(
+        hidden_dims,
+        resolved_refresh_intervals,
+        strict=True,
+    ):
+        layers.append(
+            RefreshScheduledProjectedTernaryLinear(
+                previous_dim,
+                hidden_dim,
+                threshold_scale=threshold_scale,
+                refresh_interval=layer_refresh_interval,
+                refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+                refresh_target_density=refresh_target_density,
+                refresh_projection_structure=refresh_projection_structure,
+                refresh_projection_block_size=refresh_projection_block_size,
+            )
+        )
+        layers.append(nn.Hardtanh())
+        previous_dim = hidden_dim
+
+    layers.append(nn.Linear(previous_dim, output_dim))
+    return nn.Sequential(*layers)
+
+
 def build_shadowfree_ternary_mlp(
     input_dim: int,
     hidden_dims: Sequence[int],
@@ -1017,6 +1323,499 @@ class TernaryRegressor(nn.Module):
             for module in self.modules()
             if isinstance(module, TernaryLinear)
         ]
+        if not densities:
+            return 0.0
+        return float(sum(densities) / len(densities))
+
+
+class RefreshScheduledProjectedTernaryRegressor(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Sequence[int] = (32,),
+        *,
+        use_input_shortcut: bool = True,
+        threshold_scale: float = 0.75,
+        refresh_interval: int = 4,
+        refresh_intervals: Sequence[int] | None = None,
+        refresh_project_every_n_refreshes: int = 1,
+        refresh_target_density: float | None = None,
+        refresh_projection_structure: str | None = None,
+        refresh_projection_block_size: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.ternary_path = build_refresh_scheduled_projected_ternary_mlp(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            threshold_scale=threshold_scale,
+            refresh_interval=refresh_interval,
+            refresh_intervals=refresh_intervals,
+            refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+            refresh_target_density=refresh_target_density,
+            refresh_projection_structure=refresh_projection_structure,
+            refresh_projection_block_size=refresh_projection_block_size,
+        )
+        self.shortcut = nn.Linear(input_dim, 1) if use_input_shortcut else None
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        outputs = self.ternary_path(inputs)
+        if self.shortcut is not None:
+            outputs = outputs + self.shortcut(inputs)
+        return outputs
+
+    def clip_weights_(self) -> None:
+        for module in self.modules():
+            if isinstance(module, TernaryLinear):
+                module.clip_weights_()
+
+    def apply_discrete_updates_(self) -> None:
+        for module in self.modules():
+            if isinstance(module, RefreshScheduledProjectedTernaryLinear):
+                module.apply_discrete_updates_()
+
+    def prepare_for_evaluation_(self) -> None:
+        for module in self.modules():
+            if isinstance(module, RefreshScheduledProjectedTernaryLinear):
+                module.prepare_for_evaluation_()
+
+    @classmethod
+    def from_ste_regressor(
+        cls,
+        source: TernaryRegressor,
+        *,
+        target_density: float | None = None,
+        projection_structure: str | None = None,
+        projection_block_size: int | None = None,
+        refresh_interval: int = 4,
+        refresh_intervals: Sequence[int] | None = None,
+        refresh_project_every_n_refreshes: int = 1,
+    ) -> "RefreshScheduledProjectedTernaryRegressor":
+        source_layers = [
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        ]
+        if not source_layers:
+            raise ValueError("Source TernaryRegressor contains no TernaryLinear layers.")
+
+        threshold_scale = source_layers[0].threshold_scale
+        input_dim = source_layers[0].in_features
+        hidden_dims = tuple(layer.out_features for layer in source_layers)
+        target = cls(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            use_input_shortcut=source.shortcut is not None,
+            threshold_scale=threshold_scale,
+            refresh_interval=refresh_interval,
+            refresh_intervals=refresh_intervals,
+            refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+            refresh_target_density=target_density,
+            refresh_projection_structure=projection_structure,
+            refresh_projection_block_size=projection_block_size,
+        )
+        source_device = next(source.parameters()).device
+        target.to(source_device)
+        target.initialize_from_ste_regressor_(
+            source,
+            target_density=target_density,
+        )
+        return target
+
+    @torch.no_grad()
+    def initialize_from_ste_regressor_(
+        self,
+        source: TernaryRegressor,
+        *,
+        target_density: float | None = None,
+    ) -> None:
+        source_layers = [
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        ]
+        target_layers = [
+            module
+            for module in self.modules()
+            if isinstance(module, RefreshScheduledProjectedTernaryLinear)
+        ]
+        if len(source_layers) != len(target_layers):
+            raise ValueError(
+                f"Ternary-layer count mismatch: source has {len(source_layers)}, target has {len(target_layers)}."
+            )
+
+        for source_layer, target_layer in zip(source_layers, target_layers, strict=True):
+            target_layer.weight.copy_(source_layer.weight.to(target_layer.weight.device))
+            if target_layer.bias is not None:
+                if source_layer.bias is None:
+                    target_layer.bias.zero_()
+                else:
+                    target_layer.bias.copy_(source_layer.bias.to(target_layer.bias.device))
+            target_layer.refresh_cached_state_(force_project=True)
+            if target_density is not None:
+                target_layer.sparse_inference_density_threshold = min(
+                    target_layer.sparse_inference_density_threshold,
+                    PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD,
+                )
+
+        source_output_head = cast(nn.Linear, source.ternary_path[-1])
+        target_output_head = cast(nn.Linear, self.ternary_path[-1])
+        target_output_head.load_state_dict(source_output_head.state_dict())
+
+        if source.shortcut is None:
+            self.shortcut = None
+        elif self.shortcut is None:
+            raise ValueError("Source has a shortcut but target does not.")
+        else:
+            self.shortcut.load_state_dict(source.shortcut.state_dict())
+
+    def extra_parameter_count(self) -> int:
+        return sum(
+            module.extra_parameter_count()
+            for module in self.modules()
+            if isinstance(module, RefreshScheduledProjectedTernaryLinear)
+        )
+
+    def ternary_nonzero_density(self) -> float:
+        densities = [
+            module.nonzero_density()
+            for module in self.modules()
+            if isinstance(module, RefreshScheduledProjectedTernaryLinear)
+        ]
+        if not densities:
+            return 0.0
+        return float(sum(densities) / len(densities))
+
+
+class TernaryActivationQuantizer(nn.Module):
+    def __init__(self, threshold_scale: float = 0.25) -> None:
+        super().__init__()
+        if threshold_scale <= 0.0:
+            raise ValueError("activation threshold_scale must be positive.")
+        self.threshold_scale = threshold_scale
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        activation_scale = inputs.detach().abs().mean(dim=0, keepdim=True).clamp_min(1e-6)
+        threshold = activation_scale * self.threshold_scale
+        quantized = cast(torch.Tensor, TernaryQuantizeSTE.apply(inputs, threshold))
+        return quantized * activation_scale
+
+
+class LowRankDenseControlPath(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, rank: int) -> None:
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("control rank must be positive.")
+        resolved_rank = min(rank, input_dim, output_dim)
+        self.down = nn.Linear(input_dim, resolved_rank, bias=False)
+        self.up = nn.Linear(resolved_rank, output_dim, bias=False)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.down.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.up.weight)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.up(F.relu(self.down(inputs)))
+
+
+class ScalarGatedControlPath(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int) -> None:
+        super().__init__()
+        self.gate = nn.Linear(input_dim, 1)
+        self.output_gain = nn.Parameter(torch.full((output_dim,), 0.1))
+        self.output_bias = nn.Parameter(torch.zeros(output_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+        with torch.no_grad():
+            self.output_gain.fill_(0.1)
+            self.output_bias.zero_()
+
+    def forward(self, inputs: torch.Tensor, bulk_outputs: torch.Tensor) -> torch.Tensor:
+        gate = torch.tanh(self.gate(inputs))
+        return bulk_outputs * (1.0 + gate * self.output_gain) + gate * self.output_bias
+
+
+def _resolve_control_ranks(
+    hidden_dims: Sequence[int],
+    control_rank: int,
+    control_ranks: Sequence[int] | None,
+) -> tuple[int, ...]:
+    if control_ranks is None:
+        return tuple(control_rank for _ in hidden_dims)
+
+    resolved = tuple(int(rank) for rank in control_ranks)
+    if len(resolved) != len(hidden_dims):
+        raise ValueError(
+            "control_ranks must have the same length as hidden_dims when provided."
+        )
+    if any(rank < 0 for rank in resolved):
+        raise ValueError("control_ranks entries must be non-negative.")
+    return resolved
+
+
+def _resolve_refresh_intervals(
+    hidden_dims: Sequence[int],
+    refresh_interval: int,
+    refresh_intervals: Sequence[int] | None,
+) -> tuple[int, ...]:
+    if refresh_intervals is None:
+        return tuple(refresh_interval for _ in hidden_dims)
+
+    resolved = tuple(int(interval) for interval in refresh_intervals)
+    if len(resolved) != len(hidden_dims):
+        raise ValueError(
+            "refresh_intervals must have the same length as hidden_dims when provided."
+        )
+    if any(interval <= 0 for interval in resolved):
+        raise ValueError("refresh_intervals entries must be positive.")
+    return resolved
+
+
+class ControlledRefreshProjectedTernaryBlock(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        threshold_scale: float = 0.75,
+        refresh_interval: int = 8,
+        refresh_project_every_n_refreshes: int = 1,
+        refresh_target_density: float | None = None,
+        refresh_projection_structure: str | None = None,
+        refresh_projection_block_size: int | None = None,
+        control_rank: int = 16,
+        control_mode: str = "low_rank",
+        activation_threshold_scale: float = 0.25,
+        quantize_hidden_activations: bool = True,
+    ) -> None:
+        super().__init__()
+        self.bulk = RefreshScheduledProjectedTernaryLinear(
+            input_dim,
+            output_dim,
+            threshold_scale=threshold_scale,
+            refresh_interval=refresh_interval,
+            refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+            refresh_target_density=refresh_target_density,
+            refresh_projection_structure=refresh_projection_structure,
+            refresh_projection_block_size=refresh_projection_block_size,
+        )
+        self.control_mode = control_mode
+        if control_rank <= 0:
+            self.control = None
+        elif control_mode == "low_rank":
+            self.control = LowRankDenseControlPath(input_dim, output_dim, control_rank)
+        elif control_mode == "scalar_gate":
+            self.control = ScalarGatedControlPath(input_dim, output_dim)
+        else:
+            raise ValueError("control_mode must be 'low_rank' or 'scalar_gate'.")
+        self.activation = nn.Hardtanh()
+        self.activation_quantizer = (
+            TernaryActivationQuantizer(activation_threshold_scale)
+            if quantize_hidden_activations
+            else nn.Identity()
+        )
+        self.quantize_hidden_activations = quantize_hidden_activations
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        bulk_outputs = self.bulk(inputs)
+        if self.control is None:
+            outputs = bulk_outputs
+        elif isinstance(self.control, LowRankDenseControlPath):
+            outputs = bulk_outputs + self.control(inputs)
+        else:
+            outputs = self.control(inputs, bulk_outputs)
+        outputs = self.activation(outputs)
+        outputs = self.activation_quantizer(outputs)
+        return outputs
+
+    def clip_weights_(self) -> None:
+        self.bulk.clip_weights_()
+
+    def apply_discrete_updates_(self) -> None:
+        self.bulk.apply_discrete_updates_()
+
+    def prepare_for_evaluation_(self) -> None:
+        self.bulk.prepare_for_evaluation_()
+
+    def nonzero_density(self) -> float:
+        return self.bulk.nonzero_density()
+
+    def extra_parameter_count(self) -> int:
+        return self.bulk.extra_parameter_count()
+
+
+class ControlledRefreshProjectedTernaryRegressor(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Sequence[int] = (32,),
+        *,
+        use_input_shortcut: bool = True,
+        threshold_scale: float = 0.75,
+        refresh_interval: int = 8,
+        refresh_intervals: Sequence[int] | None = None,
+        refresh_project_every_n_refreshes: int = 1,
+        refresh_target_density: float | None = None,
+        refresh_projection_structure: str | None = None,
+        refresh_projection_block_size: int | None = None,
+        control_rank: int = 16,
+        control_ranks: Sequence[int] | None = None,
+        control_mode: str = "low_rank",
+        activation_threshold_scale: float = 0.25,
+        quantize_hidden_activations: bool = True,
+    ) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        previous_dim = input_dim
+        resolved_control_ranks = _resolve_control_ranks(
+            hidden_dims,
+            control_rank,
+            control_ranks,
+        )
+        resolved_refresh_intervals = _resolve_refresh_intervals(
+            hidden_dims,
+            refresh_interval,
+            refresh_intervals,
+        )
+        for hidden_dim, block_control_rank, block_refresh_interval in zip(
+            hidden_dims,
+            resolved_control_ranks,
+            resolved_refresh_intervals,
+            strict=True,
+        ):
+            self.blocks.append(
+                ControlledRefreshProjectedTernaryBlock(
+                    previous_dim,
+                    hidden_dim,
+                    threshold_scale=threshold_scale,
+                    refresh_interval=block_refresh_interval,
+                    refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+                    refresh_target_density=refresh_target_density,
+                    refresh_projection_structure=refresh_projection_structure,
+                    refresh_projection_block_size=refresh_projection_block_size,
+                    control_rank=block_control_rank,
+                    control_mode=control_mode,
+                    activation_threshold_scale=activation_threshold_scale,
+                    quantize_hidden_activations=quantize_hidden_activations,
+                )
+            )
+            previous_dim = hidden_dim
+        self.output_head = nn.Linear(previous_dim, 1)
+        self.shortcut = nn.Linear(input_dim, 1) if use_input_shortcut else None
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        hidden = inputs
+        for block in self.blocks:
+            hidden = block(hidden)
+        outputs = self.output_head(hidden)
+        if self.shortcut is not None:
+            outputs = outputs + self.shortcut(inputs)
+        return outputs
+
+    def clip_weights_(self) -> None:
+        for block in self.blocks:
+            block.clip_weights_()
+
+    def apply_discrete_updates_(self) -> None:
+        for block in self.blocks:
+            block.apply_discrete_updates_()
+
+    def prepare_for_evaluation_(self) -> None:
+        for block in self.blocks:
+            block.prepare_for_evaluation_()
+
+    @classmethod
+    def from_ste_regressor(
+        cls,
+        source: TernaryRegressor,
+        *,
+        target_density: float | None = None,
+        projection_structure: str | None = None,
+        projection_block_size: int | None = None,
+        refresh_interval: int = 8,
+        refresh_intervals: Sequence[int] | None = None,
+        refresh_project_every_n_refreshes: int = 1,
+        control_rank: int = 16,
+        control_ranks: Sequence[int] | None = None,
+        control_mode: str = "low_rank",
+        activation_threshold_scale: float = 0.25,
+        quantize_hidden_activations: bool = True,
+    ) -> "ControlledRefreshProjectedTernaryRegressor":
+        source_layers = [
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        ]
+        if not source_layers:
+            raise ValueError("Source TernaryRegressor contains no TernaryLinear layers.")
+
+        threshold_scale = source_layers[0].threshold_scale
+        input_dim = source_layers[0].in_features
+        hidden_dims = tuple(layer.out_features for layer in source_layers)
+        target = cls(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            use_input_shortcut=source.shortcut is not None,
+            threshold_scale=threshold_scale,
+            refresh_interval=refresh_interval,
+            refresh_intervals=refresh_intervals,
+            refresh_project_every_n_refreshes=refresh_project_every_n_refreshes,
+            refresh_target_density=target_density,
+            refresh_projection_structure=projection_structure,
+            refresh_projection_block_size=projection_block_size,
+            control_rank=control_rank,
+            control_ranks=control_ranks,
+            control_mode=control_mode,
+            activation_threshold_scale=activation_threshold_scale,
+            quantize_hidden_activations=quantize_hidden_activations,
+        )
+        source_device = next(source.parameters()).device
+        target.to(source_device)
+        target.initialize_from_ste_regressor_(source, target_density=target_density)
+        return target
+
+    @torch.no_grad()
+    def initialize_from_ste_regressor_(
+        self,
+        source: TernaryRegressor,
+        *,
+        target_density: float | None = None,
+    ) -> None:
+        source_layers = [
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        ]
+        if len(source_layers) != len(self.blocks):
+            raise ValueError(
+                f"Ternary-layer count mismatch: source has {len(source_layers)}, target has {len(self.blocks)}."
+            )
+
+        for source_layer, target_block in zip(source_layers, self.blocks, strict=True):
+            target_bulk = target_block.bulk
+            target_bulk.weight.copy_(source_layer.weight.to(target_bulk.weight.device))
+            if target_bulk.bias is not None:
+                if source_layer.bias is None:
+                    target_bulk.bias.zero_()
+                else:
+                    target_bulk.bias.copy_(source_layer.bias.to(target_bulk.bias.device))
+            target_bulk.refresh_cached_state_(force_project=True)
+            if target_density is not None:
+                target_bulk.sparse_inference_density_threshold = min(
+                    target_bulk.sparse_inference_density_threshold,
+                    PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD,
+                )
+
+        source_output_head = cast(nn.Linear, source.ternary_path[-1])
+        self.output_head.load_state_dict(source_output_head.state_dict())
+
+        if source.shortcut is None:
+            self.shortcut = None
+        elif self.shortcut is None:
+            raise ValueError("Source has a shortcut but target does not.")
+        else:
+            self.shortcut.load_state_dict(source.shortcut.state_dict())
+
+    def extra_parameter_count(self) -> int:
+        return sum(block.extra_parameter_count() for block in self.blocks)
+
+    def ternary_nonzero_density(self) -> float:
+        densities = [block.nonzero_density() for block in self.blocks]
         if not densities:
             return 0.0
         return float(sum(densities) / len(densities))

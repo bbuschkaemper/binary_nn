@@ -150,7 +150,8 @@ anchor.
 
 `run_ternary_research_comparison.py`
 -> dense baseline
--> selected ternary family (`shadowfree`, `ste`, `hybrid`, or `projected`)
+-> selected ternary family (`shadowfree`, `ste`, `hybrid`, `projected`,
+   `refresh_projected`, or `controlled_refresh_projected`)
 -> runtime capture
 -> CPU inference benchmarking
 -> JSON + CSV artifacts under `/mnt`
@@ -190,9 +191,11 @@ Best starting files:
 
 - `src/regression_models.py`
 - `src/regression_experiment.py`
+- `src/run_hybrid_ternary_regression.py`
 
 Keep activation experiments easy to toggle so they can be benchmarked cleanly against
-the current projected anchor.
+the current projected anchor. The current controlled-refresh branch is now the main
+place where low-bit activation experiments and tiny dense control paths meet.
 
 ### 4.4 Add GPU inference operator benchmarking
 
@@ -216,15 +219,18 @@ The binary Triton path is the current example to emulate or generalize.
 
 ## 6. Most Likely Next Architectural Extension
 
-The most likely next extension is a new projected-training variant with:
+The next architectural extension should now be a *lighter* version of the current
+controlled-refresh family, not a brand-new family.
 
-- a refresh interval for rebuilding the discrete ternary state
-- cached-state reuse across multiple optimizer steps
-- optional evidence accumulation between refreshes
-- artifact fields for repeated GPU timing and memory stats
+That means:
 
-That extension should reuse the current projected handoff code where possible instead
-of creating a fully separate family too early.
+- keep the refresh-scheduled projected low-bit bulk path
+- shrink or sparsify the dense control path
+- keep low-bit hidden activations only if they survive the cheaper-control ablation
+- continue judging variants with repeated GPU stage metrics rather than one-off totals
+
+The first controlled-refresh prototype already proved the architectural idea can help
+quality slightly. The next job is to make that benefit cheap enough to matter.
 
 ## 7. Practical Rule Of Thumb
 

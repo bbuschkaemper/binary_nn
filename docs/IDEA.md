@@ -1,13 +1,14 @@
 # GPU-First Low-Bit Training Idea
 
-Last updated: 2026-03-18
+Last updated: 2026-03-19
 
-This document defines the current working research hypothesis for the repository.
+This document defines the current working research idea for the repository.
 
 ## Document Role
 
 Use this file when you need to understand the main *new* idea we want to test next.
-It is a hypothesis, not a validated result.
+It now has an initial replicated result, but it is still a research direction rather
+than a settled conclusion.
 
 ## 1. One-Sentence Summary
 
@@ -176,3 +177,212 @@ combination of:
 The best next bet is not lower density or more CPU sparsity. It is a training idea that
 keeps projected-family quality while making the discrete state stable enough to optimize
 and stable enough for future GPU kernels to exploit.
+
+At the current corrected `K=16` operating point, the first operator evidence says the
+next speed gain probably has to come from making the always-on surrogate / non-refresh
+path cheaper, not from a simple rewrite of the refresh projection step alone.
+
+## 14. First Implemented Variant
+
+The first implemented `refresh_projected` variant now exists in code.
+
+What it does:
+
+- keeps latent ternary weights as the optimizer-facing state
+- caches a projected ternary forward state and scale buffers
+- refreshes that cached state every `K` optimizer steps
+- forces one final refresh before evaluation so testing and prediction use the latest
+  discrete state
+- uses a straight-through latent-weight surrogate during training so the forward path
+  stays on the cached discrete state
+
+Replication and first sweep summary at projected density `0.001`:
+
+- `K=4` mean RMSE across seeds `42`, `7`, and `123`: `9.2377`
+- `K=8` mean RMSE across seeds `42`, `7`, and `123`: `9.2311`
+- projected ternary mean RMSE across those seeds: `9.2311`
+
+Seed-`42` sweep details:
+
+- `K=1`: `9.2845`
+- `K=2`: `9.2761`
+- `K=4`: `9.2930`
+- `K=8`: `9.2780`
+- cadence every `2` refreshes: `9.4618`
+- cadence every `4` refreshes: `13.1989`
+
+Interpretation:
+
+- the idea is now replicated across the current three-seed benchmark set
+- `K=8`, with projection on every refresh, is the best current default
+- on the current three-seed set it matches the projected mean RMSE exactly to four
+  decimals while reducing mean fit-step time versus the earlier `K=4` refresh setting
+- projection cadence must stay frequent; projecting less often was clearly negative
+
+## 15. Second Implemented Variant: Controlled Refresh-Projected
+
+The first broader architecture extension now also exists in code.
+
+What it adds on top of `refresh_projected`:
+
+- a large refresh-projected ternary bulk path
+- a small low-rank dense control path in each hidden block
+- ternary hidden-activation quantization between blocks
+
+Implemented in:
+
+- `ControlledRefreshProjectedTernaryBlock`
+- `ControlledRefreshProjectedTernaryRegressor`
+- `src/run_hybrid_ternary_regression.py` via
+  `consolidation_variant="controlled_refresh_projected"`
+- `src/run_ternary_research_comparison.py` via
+  `--model-family controlled_refresh_projected`
+
+First wide nonlinear seed-`42` result at density `0.001`, `K=8`, projection every
+refresh, control rank `16`, activation threshold scale `0.25`:
+
+- refresh-projected RMSE: `9.2780`
+- controlled refresh-projected RMSE: `9.2728`
+- refresh-projected fit / test / predict mean step time: `1.799ms` / `0.546ms` /
+  `0.504ms`
+- controlled refresh-projected fit / test / predict mean step time: `4.306ms` /
+  `1.574ms` / `1.068ms`
+- parameter count delta versus refresh-projected: `+14,336`
+
+Interpretation:
+
+- the broader architecture direction can improve quality slightly, so the "low-bit bulk
+  + dense control + low-bit activations" idea is worth keeping
+- the current dense control path is too heavy to help the GPU speed story
+- the next step is therefore not a bigger model-side sweep; it is to make the control
+  path much cheaper while checking whether the quality gain survives
+
+Follow-up sweep summary:
+
+- rank-`2` full control: RMSE `9.2757`
+- rank-`4` full control: RMSE `9.2717`
+- rank-`2` with low-bit activations disabled: RMSE `9.5991`
+- best selective low-rank point: `control_ranks=(4, 0)`
+- first-block-only scalar gate did not beat the selective low-rank point
+
+Best control-path tradeoff so far, from a clean single-GPU seed-`42` comparison:
+
+- refresh-projected RMSE: `9.2778`
+- selective low-rank controlled refresh-projected RMSE: `9.2744`
+- refresh-projected fit / test / predict mean step time: `2.012ms` / `0.558ms` /
+  `0.505ms`
+- selective low-rank controlled refresh-projected fit / test / predict mean step time:
+  `3.013ms` / `1.564ms` / `1.871ms`
+
+Interpretation update:
+
+- low-bit activations are part of the gain in this architecture, not a harmless toggle
+- the right control question is now "can we make the first-block control path much
+  cheaper or fuse it?" rather than "should we keep adding more dense correction?"
+- until that happens, `refresh_projected` remains the default GPU-first path
+
+## 16. Corrected cycle-aligned refresh benchmark
+
+The fit-stage benchmark path was later corrected for cyclic refresh models.
+
+What changed:
+
+- fit benchmarks now align refresh-style models to a refresh boundary before timing
+- the timed window now expands to cover at least two full refresh cycles
+- this makes the benchmark slower to run, but much more trustworthy for refresh-scheduled
+  models
+
+Corrected single-GPU three-seed refresh sweep:
+
+- corrected `K=8` mean RMSE: `9.2316`
+- corrected `K=16` mean RMSE: `9.2299`
+- corrected `K=8` mean fit-step time: `3.0086ms`
+- corrected `K=16` mean fit-step time: `2.7552ms`
+- dense BF16 mean fit-step time across the corrected `K=16` runs: `2.0283ms`
+
+Seed-specific corrected `K=16` fit results:
+
+- seed `42`: dense `1.560ms`, refresh `2.991ms`
+- seed `7`: dense `2.194ms`, refresh `1.726ms`
+- seed `123`: dense `2.332ms`, refresh `3.548ms`
+
+Additional corrected seed-`42` large-`K` check:
+
+- corrected `K=32` RMSE: `9.2772`
+- corrected `K=32` fit-step time: `3.984ms`
+
+Interpretation:
+
+- the benchmark fix changed the speed story materially enough that older fit-stage
+  claims should no longer be treated as decision-grade
+- `K=16` is now the best fit-oriented refresh interval tested so far
+- however, the family still does not beat dense BF16 on average, so the main goal is
+  not yet solved
+
+## 17. First layer-selective refresh probe
+
+Per-layer refresh intervals are now implemented for both `refresh_projected` and
+`controlled_refresh_projected`.
+
+First corrected seed-`42` screens:
+
+- `(16,8)`: RMSE `9.2740`, fit-step `3.648ms`
+- `(32,8)`: RMSE `9.2727`, fit-step `3.703ms`
+- uniform corrected `K=16`: RMSE `9.2740`, fit-step `2.991ms`
+
+Interpretation:
+
+- the naive selective idea did not help
+- slowing only the largest hidden block while keeping the smaller block faster was not
+  enough to improve the fit-stage tradeoff
+- if selective refresh is revisited, it should come with a stronger hypothesis than just
+  "refresh the big layer less often"
+
+## 18. First operator-level cost decomposition
+
+A reusable layer-level training-op profiler now exists in
+`src/benchmark_refresh_projected_training_ops.py`.
+
+What it measures:
+
+- dense train step
+- refresh non-refresh step
+- refresh refresh-step
+- forward / backward / optimizer / post-step timing
+- estimated mean step cost at a chosen refresh interval
+- optional projection-disabled runs via `--refresh-target-density none`
+
+First same-GPU `K=16` measurements on the two wide hidden-layer shapes:
+
+- shape `(128,256,256)`: dense `0.6724ms`, refresh non-refresh `0.7647ms`,
+  refresh-step `1.3465ms`
+- shape `(128,256,128)`: dense `0.6631ms`, refresh non-refresh `0.8534ms`,
+  refresh-step `1.4079ms`
+
+Decomposition:
+
+- shape `(128,256,256)`: mean gap versus dense `0.1287ms` =
+  `0.0923ms` surrogate + `0.0364ms` amortized refresh hook
+- shape `(128,256,128)`: mean gap versus dense `0.2249ms` =
+  `0.1903ms` surrogate + `0.0347ms` amortized refresh hook
+
+Projection isolation:
+
+- disabling density projection reduced refresh-step post cost by `0.3382ms` and
+  `0.3267ms` on those same shapes
+- at `K=16`, that corresponds to only about `0.021ms` mean step cost per hidden layer
+
+Pruning microbenchmark:
+
+- the current exact `topk` density pruner beat a `kthvalue` threshold replacement by
+  `1.36x` to `1.82x` on representative shapes
+
+Interpretation:
+
+- the refresh hook is a real spike on refresh boundaries
+- however, at the current `K=16` operating point the mean fit-step gap is still more
+  dominated by the always-on surrogate path than by the amortized hook
+- that means the next operator target should be ternary-aware non-refresh
+  forward/backward work or a cheaper surrogate representation
+- projection-hook work is still a worthwhile secondary target, but it no longer looks
+  like the first bottleneck to attack

@@ -14,14 +14,20 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
+from regression_experiment import TrainingConfig
 from regression_data import RegressionDataConfig, create_regression_dataloaders
 from regression_models import (
+    ControlledRefreshProjectedTernaryRegressor,
+    ScalarGatedControlPath,
     PROJECTED_SPARSE_INFERENCE_DENSITY_THRESHOLD,
+    RefreshScheduledProjectedTernaryLinear,
+    RefreshScheduledProjectedTernaryRegressor,
     ShadowFreeTernaryLinear,
     ShadowFreeTernaryRegressor,
     TernaryLinear,
     TernaryRegressor,
 )
+from run_hybrid_ternary_regression import train_hybrid_ternary_regression
 from ternary_kernels import (
     pack_packed_ternary_lookup_weight,
     packed_ternary_lookup_linear_cpu,
@@ -386,6 +392,394 @@ def test_projected_shadowfree_regressor_does_not_default_to_sparse() -> None:
     target.eval()
     with torch.no_grad():
         assert not structured_layer._should_use_sparse_inference(torch.randn(3, 4))
+
+
+def test_refresh_scheduled_ternary_linear_holds_cached_state_until_refresh() -> None:
+    layer = RefreshScheduledProjectedTernaryLinear(
+        in_features=4,
+        out_features=2,
+        bias=False,
+        threshold_scale=0.5,
+        refresh_interval=2,
+        refresh_target_density=0.25,
+    )
+    with torch.no_grad():
+        layer.weight.copy_(
+            torch.tensor(
+                [
+                    [0.95, 0.8, 0.1, 0.0],
+                    [-0.9, -0.75, 0.0, 0.1],
+                ],
+                dtype=torch.float32,
+            )
+        )
+        layer.refresh_cached_state_(force_project=True)
+
+    inputs = torch.randn(5, 4)
+    layer.eval()
+    baseline_outputs = layer(inputs)
+
+    with torch.no_grad():
+        layer.weight.copy_(
+            torch.tensor(
+                [
+                    [0.0, 0.1, 0.95, 0.8],
+                    [0.1, 0.0, -0.9, -0.75],
+                ],
+                dtype=torch.float32,
+            )
+        )
+
+    stale_outputs = layer(inputs)
+    layer.apply_discrete_updates_()
+    still_stale_outputs = layer(inputs)
+    layer.apply_discrete_updates_()
+    refreshed_outputs = layer(inputs)
+
+    assert torch.allclose(stale_outputs, baseline_outputs, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(still_stale_outputs, baseline_outputs, atol=1e-6, rtol=1e-6)
+    assert not torch.allclose(
+        refreshed_outputs, baseline_outputs, atol=1e-6, rtol=1e-6
+    )
+
+
+def test_refresh_scheduled_regressor_can_initialize_from_ste_regressor() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(3,),
+        use_input_shortcut=True,
+        threshold_scale=0.5,
+    )
+    with torch.no_grad():
+        ternary_layer = next(
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        )
+        ternary_layer.weight.copy_(
+            torch.tensor(
+                [
+                    [0.9, 0.1, -0.8, 0.0],
+                    [0.0, 0.7, 0.0, -0.9],
+                    [0.8, 0.9, 0.1, -0.1],
+                ],
+                dtype=torch.float32,
+            )
+        )
+        assert ternary_layer.bias is not None
+        ternary_layer.bias.copy_(torch.tensor([0.05, -0.1, 0.2]))
+        output_head = source.ternary_path[-1]
+        assert isinstance(output_head, torch.nn.Linear)
+        output_head.weight.copy_(torch.tensor([[0.4, -0.2, 0.1]], dtype=torch.float32))
+        output_head.bias.copy_(torch.tensor([0.3], dtype=torch.float32))
+        assert source.shortcut is not None
+        source.shortcut.weight.copy_(
+            torch.tensor([[0.2, -0.1, 0.05, 0.3]], dtype=torch.float32)
+        )
+        source.shortcut.bias.copy_(torch.tensor([0.15], dtype=torch.float32))
+
+    target = RefreshScheduledProjectedTernaryRegressor.from_ste_regressor(
+        source,
+        refresh_interval=2,
+    )
+
+    inputs = torch.randn(6, 4)
+    source.eval()
+    target.eval()
+
+    source_outputs = source(inputs)
+    target_outputs = target(inputs)
+
+    assert torch.allclose(target_outputs, source_outputs, atol=1e-6, rtol=1e-6)
+
+
+def test_refresh_scheduled_regressor_supports_selective_refresh_intervals() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(3, 2),
+        use_input_shortcut=False,
+        threshold_scale=0.5,
+    )
+    target = RefreshScheduledProjectedTernaryRegressor.from_ste_regressor(
+        source,
+        refresh_intervals=(4, 2),
+    )
+
+    inputs = torch.randn(6, 4)
+    source.eval()
+    target.eval()
+
+    source_outputs = source(inputs)
+    target_outputs = target(inputs)
+    target_layers = [
+        module
+        for module in target.modules()
+        if isinstance(module, RefreshScheduledProjectedTernaryLinear)
+    ]
+
+    assert torch.allclose(target_outputs, source_outputs, atol=1e-6, rtol=1e-6)
+    assert [layer.refresh_interval for layer in target_layers] == [4, 2]
+
+
+def test_controlled_refresh_projected_regressor_can_initialize_from_ste_regressor() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(3,),
+        use_input_shortcut=True,
+        threshold_scale=0.5,
+    )
+    with torch.no_grad():
+        ternary_layer = next(
+            module for module in source.modules() if isinstance(module, TernaryLinear)
+        )
+        ternary_layer.weight.copy_(
+            torch.tensor(
+                [
+                    [0.9, 0.1, -0.8, 0.0],
+                    [0.0, 0.7, 0.0, -0.9],
+                    [0.8, 0.9, 0.1, -0.1],
+                ],
+                dtype=torch.float32,
+            )
+        )
+        assert ternary_layer.bias is not None
+        ternary_layer.bias.copy_(torch.tensor([0.05, -0.1, 0.2]))
+        output_head = source.ternary_path[-1]
+        assert isinstance(output_head, torch.nn.Linear)
+        output_head.weight.copy_(torch.tensor([[0.4, -0.2, 0.1]], dtype=torch.float32))
+        output_head.bias.copy_(torch.tensor([0.3], dtype=torch.float32))
+        assert source.shortcut is not None
+        source.shortcut.weight.copy_(
+            torch.tensor([[0.2, -0.1, 0.05, 0.3]], dtype=torch.float32)
+        )
+        source.shortcut.bias.copy_(torch.tensor([0.15], dtype=torch.float32))
+
+    target = ControlledRefreshProjectedTernaryRegressor.from_ste_regressor(
+        source,
+        refresh_interval=2,
+        control_rank=2,
+        quantize_hidden_activations=False,
+    )
+
+    inputs = torch.randn(6, 4)
+    source.eval()
+    target.eval()
+
+    source_outputs = source(inputs)
+    target_outputs = target(inputs)
+
+    assert torch.allclose(target_outputs, source_outputs, atol=1e-6, rtol=1e-6)
+    assert torch.count_nonzero(target.blocks[0].control.up.weight) == 0
+
+
+def test_controlled_refresh_projected_regressor_supports_selective_refresh_intervals() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(3, 2),
+        use_input_shortcut=False,
+        threshold_scale=0.5,
+    )
+    target = ControlledRefreshProjectedTernaryRegressor.from_ste_regressor(
+        source,
+        refresh_intervals=(4, 2),
+        control_ranks=(0, 2),
+        quantize_hidden_activations=False,
+    )
+
+    inputs = torch.randn(6, 4)
+    source.eval()
+    target.eval()
+
+    source_outputs = source(inputs)
+    target_outputs = target(inputs)
+
+    assert torch.allclose(target_outputs, source_outputs, atol=1e-6, rtol=1e-6)
+    assert [block.bulk.refresh_interval for block in target.blocks] == [4, 2]
+
+
+def test_controlled_refresh_projected_regressor_supports_selective_control_ranks() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(3, 2),
+        use_input_shortcut=False,
+        threshold_scale=0.5,
+    )
+    target = ControlledRefreshProjectedTernaryRegressor.from_ste_regressor(
+        source,
+        refresh_interval=2,
+        control_ranks=(0, 2),
+        quantize_hidden_activations=False,
+    )
+
+    inputs = torch.randn(6, 4)
+    source.eval()
+    target.eval()
+
+    source_outputs = source(inputs)
+    target_outputs = target(inputs)
+
+    assert torch.allclose(target_outputs, source_outputs, atol=1e-6, rtol=1e-6)
+    assert target.blocks[0].control is None
+    assert target.blocks[1].control is not None
+
+
+def test_controlled_refresh_projected_regressor_supports_scalar_gate_control() -> None:
+    source = TernaryRegressor(
+        input_dim=4,
+        hidden_dims=(3,),
+        use_input_shortcut=False,
+        threshold_scale=0.5,
+    )
+    target = ControlledRefreshProjectedTernaryRegressor.from_ste_regressor(
+        source,
+        refresh_interval=2,
+        control_mode="scalar_gate",
+        quantize_hidden_activations=False,
+    )
+
+    inputs = torch.randn(6, 4)
+    source.eval()
+    target.eval()
+
+    source_outputs = source(inputs)
+    target_outputs = target(inputs)
+
+    assert torch.allclose(target_outputs, source_outputs, atol=1e-6, rtol=1e-6)
+    assert isinstance(target.blocks[0].control, ScalarGatedControlPath)
+
+
+def test_hybrid_training_supports_refresh_projected_variant() -> None:
+    run = train_hybrid_ternary_regression(
+        data_config=RegressionDataConfig(
+            n_samples=256,
+            n_features=16,
+            n_informative=16,
+            noise=8.0,
+            target_kind="nonlinear_residual",
+            nonlinear_scale=4.0,
+            nonlinear_pair_count=4,
+            batch_size=32,
+            random_state=19,
+        ),
+        warm_start_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=2,
+            learning_rate=1e-3,
+            seed=19,
+            accelerator="cpu",
+        ),
+        consolidation_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=1,
+            learning_rate=1e-3,
+            seed=19,
+            accelerator="cpu",
+        ),
+        threshold_scale=0.5,
+        consolidation_variant="refresh_projected",
+        projection_target_density=0.25,
+        refresh_interval=2,
+        refresh_project_every_n_refreshes=1,
+    )
+
+    assert isinstance(
+        run.final_result.model.model,
+        RefreshScheduledProjectedTernaryRegressor,
+    )
+    assert run.final_result.test_metrics.rmse > 0.0
+    assert run.final_result.model.model.ternary_nonzero_density() <= 0.25
+
+
+def test_hybrid_training_supports_selective_refresh_intervals() -> None:
+    run = train_hybrid_ternary_regression(
+        data_config=RegressionDataConfig(
+            n_samples=256,
+            n_features=16,
+            n_informative=16,
+            noise=8.0,
+            target_kind="nonlinear_residual",
+            nonlinear_scale=4.0,
+            nonlinear_pair_count=4,
+            batch_size=32,
+            random_state=23,
+        ),
+        warm_start_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=2,
+            learning_rate=1e-3,
+            seed=23,
+            accelerator="cpu",
+        ),
+        consolidation_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=1,
+            learning_rate=1e-3,
+            seed=23,
+            accelerator="cpu",
+        ),
+        threshold_scale=0.5,
+        consolidation_variant="refresh_projected",
+        projection_target_density=0.25,
+        refresh_intervals=(4, 2),
+        refresh_project_every_n_refreshes=1,
+    )
+
+    target_layers = [
+        module
+        for module in run.final_result.model.model.modules()
+        if isinstance(module, RefreshScheduledProjectedTernaryLinear)
+    ]
+
+    assert isinstance(
+        run.final_result.model.model,
+        RefreshScheduledProjectedTernaryRegressor,
+    )
+    assert run.final_result.test_metrics.rmse > 0.0
+    assert [layer.refresh_interval for layer in target_layers] == [4, 2]
+    assert run.final_result.model.model.ternary_nonzero_density() <= 0.25
+
+
+def test_hybrid_training_supports_controlled_refresh_projected_variant() -> None:
+    run = train_hybrid_ternary_regression(
+        data_config=RegressionDataConfig(
+            n_samples=256,
+            n_features=16,
+            n_informative=16,
+            noise=8.0,
+            target_kind="nonlinear_residual",
+            nonlinear_scale=4.0,
+            nonlinear_pair_count=4,
+            batch_size=32,
+            random_state=29,
+        ),
+        warm_start_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=2,
+            learning_rate=1e-3,
+            seed=29,
+            accelerator="cpu",
+        ),
+        consolidation_training_config=TrainingConfig(
+            hidden_dims=(16, 8),
+            epochs=1,
+            learning_rate=1e-3,
+            seed=29,
+            accelerator="cpu",
+        ),
+        threshold_scale=0.5,
+        consolidation_variant="controlled_refresh_projected",
+        projection_target_density=0.25,
+        refresh_interval=2,
+        refresh_project_every_n_refreshes=1,
+        control_rank=4,
+        control_ranks=(0, 4),
+        activation_threshold_scale=0.25,
+    )
+
+    assert isinstance(
+        run.final_result.model.model,
+        ControlledRefreshProjectedTernaryRegressor,
+    )
+    assert run.final_result.test_metrics.rmse > 0.0
+    assert run.final_result.model.model.ternary_nonzero_density() <= 0.25
 
 
 def test_shadowfree_ternary_linear_index_inference_matches_dense_path() -> None:
